@@ -2,10 +2,7 @@
   "name": "solana-trading-agent",
   "version": "1.0.0",
   "private": true,
-  "workspaces": [
-    "agent",
-    "dashboard"
-  ],
+
   "scripts": {
     "dev:agent": "npm run dev --workspace=agent",
     "dev:dashboard": "npm run dev --workspace=dashboard",
