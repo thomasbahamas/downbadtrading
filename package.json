@@ -1,0 +1,24 @@
+{
+  "name": "solana-trading-agent",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "agent",
+    "dashboard"
+  ],
+  "scripts": {
+    "dev:agent": "npm run dev --workspace=agent",
+    "dev:dashboard": "npm run dev --workspace=dashboard",
+    "build:agent": "npm run build --workspace=agent",
+    "build:dashboard": "npm run build --workspace=dashboard",
+    "paper-trade": "ts-node --project agent/tsconfig.json scripts/paper-trade.ts",
+    "setup": "bash scripts/setup.sh"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}
