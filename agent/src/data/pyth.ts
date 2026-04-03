@@ -58,26 +58,20 @@ export class PythClient {
       const pythPriceMap = new Map<string, PythPriceData>();
       for (let i = 0; i < mintsWithFeeds.length; i++) {
         const accountInfo = accountInfos[i];
-        if (!accountInfo) continue;
+        if (!accountInfo || !accountInfo.data) continue;
 
-        // TODO: parse Pyth price account data using @pythnetwork/client
-        // The raw account data is 3312 bytes with a specific binary format.
-        // Use parsePriceData() from @pythnetwork/client to decode it.
-        //
-        // Example (after installing @pythnetwork/client):
-        //   import { parsePriceData } from '@pythnetwork/client';
-        //   const priceData = parsePriceData(accountInfo.data);
-        //   if (priceData.status === PriceStatus.Trading) {
-        //     pythPriceMap.set(mintsWithFeeds[i].mint, {
-        //       price: priceData.price,
-        //       confidence: priceData.confidence,
-        //       publishTime: priceData.timestamp * 1000,
-        //       emaPrice: priceData.emaPrice?.price,
-        //     });
-        //   }
-
-        // Placeholder until @pythnetwork/client is wired up:
-        logger.debug(`Pyth account info fetched for ${mintsWithFeeds[i].symbol}`);
+        try {
+          const priceData = parsePythPriceAccount(accountInfo.data as Buffer);
+          if (priceData) {
+            pythPriceMap.set(mintsWithFeeds[i].mint, priceData);
+            logger.debug(
+              `Pyth price for ${mintsWithFeeds[i].symbol}: $${priceData.price.toFixed(4)} ` +
+              `(conf: $${priceData.confidence.toFixed(4)})`
+            );
+          }
+        } catch (err) {
+          logger.debug(`Pyth parse failed for ${mintsWithFeeds[i].symbol}: ${err}`);
+        }
       }
 
       return tokens.map((t) => {
@@ -103,15 +97,63 @@ export class PythClient {
 
     try {
       const accountInfo = await this.connection.getAccountInfo(new PublicKey(feedAccount));
-      if (!accountInfo) return null;
+      if (!accountInfo || !accountInfo.data) return null;
 
-      // TODO: parse with @pythnetwork/client parsePriceData()
-      // Check publishTime staleness: reject if > 30 seconds old
+      const priceData = parsePythPriceAccount(accountInfo.data as Buffer);
+      if (!priceData) return null;
 
-      return null; // placeholder
+      // Reject stale feeds (>30 seconds old)
+      const ageMs = Date.now() - priceData.publishTime;
+      if (ageMs > 30_000) {
+        logger.debug(`Pyth feed stale for ${mint.slice(0, 8)}: ${(ageMs / 1000).toFixed(0)}s old`);
+        return null;
+      }
+
+      return priceData;
     } catch (err) {
       logger.debug(`getPrice(${mint.slice(0, 8)}) failed: ${err}`);
       return null;
     }
   }
+}
+
+/**
+ * Parse Pyth V2 price account binary data.
+ * Layout reference: https://docs.pyth.network/price-feeds/pythnet-price-feeds/on-chain-programs
+ *
+ * Key offsets (all little-endian):
+ *   - Byte 0-3: magic (0xa1b2c3d4)
+ *   - Byte 208-215: aggregate price (i64)
+ *   - Byte 216-223: aggregate confidence (u64)
+ *   - Byte 224-227: aggregate status (u32) — 1 = Trading
+ *   - Byte 232-235: exponent (i32)
+ *   - Byte 240-247: publish time (i64, unix seconds)
+ *   - Byte 248-255: EMA price (i64)
+ */
+function parsePythPriceAccount(data: Buffer): PythPriceData | null {
+  if (data.length < 260) return null;
+
+  // Verify magic number
+  const magic = data.readUInt32LE(0);
+  if (magic !== 0xa1b2c3d4) return null;
+
+  const exponent = data.readInt32LE(232);
+  const scaleFactor = 10 ** exponent;
+
+  const aggregatePrice = Number(data.readBigInt64LE(208));
+  const aggregateConfidence = Number(data.readBigUInt64LE(216));
+  const status = data.readUInt32LE(224);
+
+  // Status 1 = Trading (active and reliable)
+  if (status !== 1) return null;
+
+  const publishTimeSec = Number(data.readBigInt64LE(240));
+  const emaPrice = Number(data.readBigInt64LE(248));
+
+  return {
+    price: aggregatePrice * scaleFactor,
+    confidence: aggregateConfidence * scaleFactor,
+    publishTime: publishTimeSec * 1000,
+    emaPrice: emaPrice * scaleFactor,
+  };
 }

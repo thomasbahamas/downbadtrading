@@ -133,14 +133,29 @@ export class TradeRepository {
         trades_won: stats.tradesWon,
         trades_lost: stats.tradesLost,
         win_rate: winRate,
-        avg_winner_pct: 0, // TODO: compute from trade history
-        avg_loser_pct: 0, // TODO: compute from trade history
+        avg_winner_pct: await this.computeAvgPnlPct('tp_hit', stats.date),
+        avg_loser_pct: await this.computeAvgPnlPct('sl_hit', stats.date),
         max_drawdown_pct: stats.maxDrawdownPct,
         created_at: new Date().toISOString(),
       },
       { onConflict: 'date' }
     );
     if (error) logger.warn(`upsertDailyPerformance: ${error.message}`);
+  }
+
+  // ─── Avg PnL computation ─────────────────────────────────────────────────
+
+  private async computeAvgPnlPct(status: 'tp_hit' | 'sl_hit', date: string): Promise<number> {
+    const { data } = await this.supabase
+      .from('trades')
+      .select('realized_pnl_pct')
+      .eq('status', status)
+      .gte('closed_at', `${date}T00:00:00Z`)
+      .lt('closed_at', `${date}T23:59:59Z`);
+
+    if (!data || data.length === 0) return 0;
+    const sum = data.reduce((s: number, r: { realized_pnl_pct: number | null }) => s + (r.realized_pnl_pct ?? 0), 0);
+    return sum / data.length;
   }
 
   // ─── Converters ──────────────────────────────────────────────────────────

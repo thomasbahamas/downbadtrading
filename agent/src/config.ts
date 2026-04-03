@@ -42,13 +42,13 @@ const envSchema = z.object({
   OPENAI_MODEL: z.string().default('gpt-4o'),
 
   // Market data
-  BIRDEYE_API_KEY: z.string().min(8),
+  BIRDEYE_API_KEY: z.string().min(1),
   BIRDEYE_BASE_URL: z.string().url().default('https://public-api.birdeye.so'),
   COINGECKO_API_KEY: z.string().min(8),
-  COINGECKO_BASE_URL: z.string().url().default('https://pro-api.coingecko.com/api/v3'),
+  COINGECKO_BASE_URL: z.string().url().default('https://api.coingecko.com/api/v3'),
 
   // Telegram
-  TELEGRAM_BOT_TOKEN: z.string().min(10),
+  TELEGRAM_BOT_TOKEN: z.string().min(1),
   TELEGRAM_CHAT_ID: z.string().min(1),
 
   // Supabase

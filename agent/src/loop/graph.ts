@@ -7,9 +7,8 @@
  *                                       monitor → (loop)
  */
 
-import { StateGraph, END, START } from '@langchain/langgraph';
-import { RunnableConfig } from '@langchain/core/runnables';
-import type { AgentState, AgentConfig } from '../types';
+import { Annotation, StateGraph, END, START } from '@langchain/langgraph';
+import type { AgentState, AgentConfig, MarketSnapshot, Portfolio, Position, TradeThesis, RiskApproval, ExecutionResult } from '../types';
 import { observeNode } from './observe';
 import { analyzeNode } from './analyze';
 import { decideNode } from './decide';
@@ -21,20 +20,36 @@ import { createLogger } from '../utils/logger';
 const logger = createLogger('graph');
 
 // ─── State annotation ─────────────────────────────────────────────────────
-// LangGraph uses a reducer-based state; we define all keys here.
 
-// We pass state as a plain object — LangGraph merges return values.
-// All fields are optional in the graph; the initial state sets defaults.
+const GraphAnnotation = Annotation.Root({
+  marketSnapshot: Annotation<MarketSnapshot | null>({ reducer: (_, b) => b, default: () => null }),
+  portfolio: Annotation<Portfolio>({
+    reducer: (_, b) => b,
+    default: () => ({
+      walletAddress: '',
+      solBalance: 0,
+      usdcBalance: 0,
+      totalValueUsd: 0,
+      holdings: [],
+      dailyPnl: 0,
+      dailyPnlPct: 0,
+      totalPnl: 0,
+      peakValueUsd: 0,
+    }),
+  }),
+  activePositions: Annotation<Position[]>({ reducer: (_, b) => b, default: () => [] }),
+  thesis: Annotation<TradeThesis | null>({ reducer: (_, b) => b, default: () => null }),
+  riskApproval: Annotation<RiskApproval | null>({ reducer: (_, b) => b, default: () => null }),
+  executionResult: Annotation<ExecutionResult | null>({ reducer: (_, b) => b, default: () => null }),
+  loopCount: Annotation<number>({ reducer: (_, b) => b, default: () => 0 }),
+  lastObserveTime: Annotation<number>({ reducer: (_, b) => b, default: () => 0 }),
+  error: Annotation<string | null>({ reducer: (_, b) => b, default: () => null }),
+});
 
-type GraphState = AgentState;
+type GraphState = typeof GraphAnnotation.State;
 
 // ─── Routing functions ────────────────────────────────────────────────────
 
-/**
- * After DECIDE: if risk approved AND auto-execute, go to EXECUTE.
- * If approved but needs manual approval, go to REPORT (which sends Telegram request).
- * If rejected, skip to MONITOR.
- */
 function routeAfterDecide(state: GraphState): 'execute' | 'report' | 'monitor' {
   if (!state.riskApproval) {
     logger.warn('routeAfterDecide: riskApproval is null, routing to monitor');
@@ -47,7 +62,6 @@ function routeAfterDecide(state: GraphState): 'execute' | 'report' | 'monitor' {
   }
 
   if (!state.riskApproval.autoExecute) {
-    // Above MAX_AUTO_TRADE_USD — send approval request via Telegram first
     logger.info('Trade requires manual approval (above max auto size). Routing to report.');
     return 'report';
   }
@@ -55,99 +69,40 @@ function routeAfterDecide(state: GraphState): 'execute' | 'report' | 'monitor' {
   return 'execute';
 }
 
-/**
- * After EXECUTE: always go to REPORT (success or failure).
- */
-function routeAfterExecute(_state: GraphState): 'report' {
-  return 'report';
-}
-
-/**
- * After REPORT: always go to MONITOR.
- */
-function routeAfterReport(_state: GraphState): 'monitor' {
-  return 'monitor';
-}
-
-/**
- * After MONITOR: always loop back to OBSERVE (the graph itself is the loop).
- * The index.ts scheduler controls inter-loop sleep.
- */
-function routeAfterMonitor(_state: GraphState): typeof END {
-  return END;
-}
-
 // ─── Graph builder ────────────────────────────────────────────────────────
 
 export async function createAgentGraph(agentConfig: AgentConfig) {
-  // Build node functions with injected config
-  const observe = (state: GraphState, runConfig?: RunnableConfig) =>
-    observeNode(state, agentConfig, runConfig);
-  const analyze = (state: GraphState, runConfig?: RunnableConfig) =>
-    analyzeNode(state, agentConfig, runConfig);
-  const decide = (state: GraphState) => decideNode(state, agentConfig);
-  const execute = (state: GraphState) => executeNode(state, agentConfig);
-  const report = (state: GraphState) => reportNode(state, agentConfig);
-  const monitor = (state: GraphState) => monitorNode(state, agentConfig);
+  const observe = (state: GraphState) =>
+    observeNode(state as AgentState, agentConfig);
+  const analyze = (state: GraphState) =>
+    analyzeNode(state as AgentState, agentConfig);
+  const decide = (state: GraphState) => decideNode(state as AgentState, agentConfig);
+  const execute = (state: GraphState) => executeNode(state as AgentState, agentConfig);
+  const report = (state: GraphState) => reportNode(state as AgentState, agentConfig);
+  const monitor = (state: GraphState) => monitorNode(state as AgentState, agentConfig);
 
-  const workflow = new StateGraph<GraphState>({
-    channels: {
-      marketSnapshot: { default: () => null },
-      portfolio: {
-        default: () => ({
-          walletAddress: '',
-          solBalance: 0,
-          usdcBalance: 0,
-          totalValueUsd: 0,
-          holdings: [],
-          dailyPnl: 0,
-          dailyPnlPct: 0,
-          totalPnl: 0,
-          peakValueUsd: 0,
-        }),
-      },
-      activePositions: { default: () => [] },
-      thesis: { default: () => null },
-      riskApproval: { default: () => null },
-      executionResult: { default: () => null },
-      loopCount: { default: () => 0 },
-      lastObserveTime: { default: () => 0 },
-      error: { default: () => null },
-    },
-  });
+  // Chain all node and edge additions for proper type inference
+  const compiled = new StateGraph(GraphAnnotation)
+    .addNode('observe', observe)
+    .addNode('analyze', analyze)
+    .addNode('decide', decide)
+    .addNode('execute', execute)
+    .addNode('report', report)
+    .addNode('monitor', monitor)
+    .addEdge(START, 'observe')
+    .addEdge('observe', 'analyze')
+    .addEdge('analyze', 'decide')
+    .addConditionalEdges('decide', routeAfterDecide, {
+      execute: 'execute',
+      report: 'report',
+      monitor: 'monitor',
+    })
+    .addEdge('execute', 'report')
+    .addEdge('report', 'monitor')
+    .addEdge('monitor', END)
+    .compile();
 
-  // Register nodes
-  workflow.addNode('observe', observe);
-  workflow.addNode('analyze', analyze);
-  workflow.addNode('decide', decide);
-  workflow.addNode('execute', execute);
-  workflow.addNode('report', report);
-  workflow.addNode('monitor', monitor);
-
-  // Edges
-  workflow.addEdge(START, 'observe');
-  workflow.addEdge('observe', 'analyze');
-  workflow.addEdge('analyze', 'decide');
-
-  workflow.addConditionalEdges('decide', routeAfterDecide, {
-    execute: 'execute',
-    report: 'report',  // approval request path
-    monitor: 'monitor',
-  });
-
-  workflow.addConditionalEdges('execute', routeAfterExecute, {
-    report: 'report',
-  });
-
-  workflow.addConditionalEdges('report', routeAfterReport, {
-    monitor: 'monitor',
-  });
-
-  workflow.addConditionalEdges('monitor', routeAfterMonitor, {
-    [END]: END,
-  });
-
-  return workflow.compile();
+  return compiled;
 }
 
 // ─── Initial state factory ────────────────────────────────────────────────

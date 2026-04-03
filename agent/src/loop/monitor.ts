@@ -241,8 +241,7 @@ async function maybeUpdateTrailingStop(
     const newStopLoss = position.entryPriceUsd; // Move SL to breakeven
 
     try {
-      // TODO: implement trigger.editOrder() to update slPriceUsd
-      // await trigger.editOrder(position.jupiterOrderId, { slPriceUsd: newStopLoss });
+      await trigger.editOrder(position.jupiterOrderId, { slPriceUsd: newStopLoss });
 
       const updatedPosition: Position = {
         ...position,

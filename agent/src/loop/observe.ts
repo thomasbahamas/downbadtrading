@@ -4,11 +4,13 @@
  * Collects market data from all data sources, builds a MarketSnapshot,
  * and fetches the current on-chain portfolio state.
  *
+ * Primary token data: CoinGecko /coins/markets (Solana ecosystem)
+ * Supplemental: Pyth oracle prices, Helius on-chain events
+ *
  * Returns: { marketSnapshot, portfolio }
  */
 
-import type { AgentState, AgentConfig, MarketSnapshot, Portfolio } from '../types';
-import { BirdeyeClient } from '../data/birdeye';
+import type { AgentState, AgentConfig, MarketSnapshot, TokenData, Portfolio } from '../types';
 import { CoinGeckoClient } from '../data/coingecko';
 import { PythClient } from '../data/pyth';
 import { HeliusClient } from '../data/helius';
@@ -17,19 +19,31 @@ import { createLogger } from '../utils/logger';
 
 const logger = createLogger('observe');
 
-// ─── Tokens to watch ──────────────────────────────────────────────────────
-// These are the well-known mints the agent always includes in its universe.
-// Birdeye trending tokens are added dynamically each loop.
+// ─── CoinGecko ID → Solana mint mapping ──────────────────────────────────
+// CoinGecko returns coin IDs (e.g. "solana"), not mint addresses.
+// Map the major ones so the rest of the pipeline can reference mints.
 
-export const WELL_KNOWN_MINTS: Record<string, { symbol: string; name: string }> = {
-  So11111111111111111111111111111111111111112: { symbol: 'SOL', name: 'Solana' },
-  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: { symbol: 'USDC', name: 'USD Coin' },
-  Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: { symbol: 'USDT', name: 'Tether' },
-  '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs': { symbol: 'ETH', name: 'Ethereum (Wormhole)' },
-  mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So: { symbol: 'mSOL', name: 'Marinade staked SOL' },
-  JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN: { symbol: 'JUP', name: 'Jupiter' },
-  '27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4': { symbol: 'JLP', name: 'Jupiter LP' },
-  bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1: { symbol: 'bSOL', name: 'BlazeStake SOL' },
+const COINGECKO_ID_TO_MINT: Record<string, string> = {
+  solana: 'So11111111111111111111111111111111111111112',
+  'usd-coin': 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  tether: 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',
+  'wormhole-ethereum': '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs',
+  'msol': 'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',
+  jupiter: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',
+  'jupiter-perpetuals-liquidity-provider-token': '27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4',
+  blazestake: 'bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1',
+  raydium: '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R',
+  orca: 'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE',
+  bonk: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
+  'render-token': 'rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof',
+  pyth: 'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3',
+  jito: 'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn',
+  marinade: 'MNDEFzGvMt87ueuHvVU9VcTqsAP5b3fTGPsHuuPA5ey',
+  tensor: 'TNSRxcUxoT9xBG3de7PiJyTDYu7kskLqcpddxnEJAS6',
+  parcl: 'PARCLfHgFJBjKarK9YLo3g4Ln9i7VpZpPAJoB4tquua',
+  sanctum: 'SANDrkY3p95a6MUzp7KhpqP4e4yEiHQ8VRj5s3bFEDW',
+  wif: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
+  popcat: '7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr',
 };
 
 // ─── Node ─────────────────────────────────────────────────────────────────
@@ -42,7 +56,6 @@ export async function observeNode(
   logger.info('OBSERVE: collecting market data…');
   const startTime = Date.now();
 
-  const birdeye = new BirdeyeClient(config);
   const coingecko = new CoinGeckoClient(config);
   const pyth = new PythClient(config);
   const helius = new HeliusClient(config);
@@ -50,16 +63,28 @@ export async function observeNode(
 
   try {
     // ── Run data fetches in parallel ────────────────────────────────────
-    const [portfolio, trendingMints, globalMetrics, recentEvents] = await Promise.allSettled([
-      fetchPortfolio(wallet, helius, config.profitWalletAddress),
-      birdeye.getTrendingTokens(20),
+    const [portfolio, cgTokens, globalMetrics, recentEvents] = await Promise.allSettled([
+      fetchPortfolio(wallet),
+      coingecko.getSolanaTokenMarkets(30),
       coingecko.getGlobalMetrics(),
       helius.getRecentEvents(50),
     ]);
 
-    const resolvedPortfolio =
+    let resolvedPortfolio =
       portfolio.status === 'fulfilled' ? portfolio.value : state.portfolio;
-    const resolvedTrending = trendingMints.status === 'fulfilled' ? trendingMints.value : [];
+
+    // In paper trade mode, simulate starting capital if wallet is empty
+    if (config.paperTrade && resolvedPortfolio.usdcBalance === 0 && resolvedPortfolio.holdings.length === 0) {
+      const paperCapital = config.maxAutoTradeUsd * 5; // 5x max trade = $2500 simulated
+      resolvedPortfolio = {
+        ...resolvedPortfolio,
+        usdcBalance: paperCapital,
+        totalValueUsd: paperCapital,
+      };
+      logger.info(`OBSERVE: paper trade mode — simulated $${paperCapital} USDC balance`);
+    }
+    const resolvedCgTokens =
+      cgTokens.status === 'fulfilled' ? cgTokens.value : [];
     const resolvedGlobals =
       globalMetrics.status === 'fulfilled'
         ? globalMetrics.value
@@ -73,24 +98,29 @@ export async function observeNode(
           };
     const resolvedEvents = recentEvents.status === 'fulfilled' ? recentEvents.value : [];
 
-    // ── Collect token universe ──────────────────────────────────────────
-    const mintsToFetch = new Set<string>([
-      ...Object.keys(WELL_KNOWN_MINTS),
-      ...resolvedTrending,
-      // Also include mints of current holdings
-      ...resolvedPortfolio.holdings.map((h) => h.mint),
-    ]);
-
-    const tokenDataList = await birdeye.getTokenDataBatch([...mintsToFetch]);
+    // ── Map CoinGecko tokens to TokenData with Solana mints ─────────────
+    const tokenDataList: TokenData[] = resolvedCgTokens.map((t) => {
+      const knownMint = COINGECKO_ID_TO_MINT[t.mint]; // t.mint holds CG id from getSolanaTokenMarkets
+      return {
+        ...t,
+        mint: knownMint || t.mint, // use real mint if known, else CG id as fallback
+      };
+    });
 
     // ── Augment with Pyth prices where available ────────────────────────
     const tokenDataWithPyth = await pyth.augmentWithPythPrices(tokenDataList);
+
+    // Build trending list from top volume tokens
+    const trendingTokens = tokenDataWithPyth
+      .sort((a, b) => b.volume24h - a.volume24h)
+      .slice(0, 10)
+      .map((t) => t.mint);
 
     const snapshot: MarketSnapshot = {
       timestamp: Date.now(),
       tokens: tokenDataWithPyth,
       globalMetrics: resolvedGlobals,
-      trendingTokens: resolvedTrending,
+      trendingTokens,
       recentEvents: resolvedEvents,
     };
 
@@ -114,12 +144,6 @@ export async function observeNode(
 
 // ─── Portfolio fetch ──────────────────────────────────────────────────────
 
-async function fetchPortfolio(
-  wallet: TradingWallet,
-  _helius: HeliusClient,
-  _profitWallet: string
-): Promise<Portfolio> {
-  // TODO: implement using wallet.getBalances() + wallet.getTokenHoldings()
-  // For now, return current wallet state
+async function fetchPortfolio(wallet: TradingWallet): Promise<Portfolio> {
   return wallet.getPortfolio();
 }

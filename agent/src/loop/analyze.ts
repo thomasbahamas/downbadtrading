@@ -26,7 +26,7 @@ data and identify high-confidence short-term trading opportunities on the Solana
 - Only suggest trades on Solana tokens with sufficient liquidity (>$50k USD)
 - Focus on tokens showing clear technical or on-chain signals
 - You must provide specific, measurable price targets
-- Risk/reward ratio must be at least 1.5:1
+- Risk/reward ratio MUST be at least 1.5:1 — your TP should be at least 1.5x further from entry than your SL. E.g. entry=$1.00, SL=$0.92 (8% risk) → TP must be ≥$1.12 (12% reward). This is a hard requirement — trades below 1.5 R/R will be automatically rejected.
 - If no clear opportunity exists, return a no-trade signal
 
 ## Output format
@@ -64,6 +64,13 @@ You MUST return valid JSON matching exactly one of these schemas:
 4. Sentiment: social signals (low weight — easily manipulated)
 
 Do not suggest meme coins under 24 hours old unless volume is exceptional (>$5M in 1h).
+
+## Important behavioral notes
+- Even in extreme fear/greed markets, there are opportunities — contrarian entries during extreme fear can have excellent risk/reward
+- Missing data fields (buy/sell ratio = "n/a", volumeChange = "0%") are expected for some data sources — do not refuse to trade solely because a field is unavailable
+- If you see 3+ tokens with strong price action and healthy volume, pick the best one rather than defaulting to no-trade
+- You are a paper trading bot in development — generate trades when the setup is reasonable (confidence ≥ 0.7) so the system can be tested end-to-end
+
 Return ONLY the JSON object — no preamble, no explanation, no markdown code fences.`;
 }
 
@@ -160,7 +167,8 @@ async function callLLM(
 function parseLLMResponse(
   raw: string,
   snapshot: MarketSnapshot,
-  config: AgentConfig
+  config: AgentConfig,
+  portfolio: Portfolio
 ): TradeThesis | null {
   let parsed: Record<string, unknown>;
   try {
@@ -204,7 +212,11 @@ function parseLLMResponse(
 
   const direction = parsed.direction as 'buy' | 'sell';
   const riskRewardRatio = Math.abs(tp - entryPrice) / Math.abs(entryPrice - sl);
-  const positionSizeUsd = (positionPct / 100) * (snapshot.tokens[0]?.priceUsd || 100);
+  const availableUsd = portfolio.usdcBalance + portfolio.solBalance * (snapshot.globalMetrics.solPriceUsd || 0);
+  const positionSizeUsd = Math.min(
+    (positionPct / 100) * availableUsd,
+    config.maxAutoTradeUsd
+  );
 
   const thesis: TradeThesis = {
     id: uuidv4(),
@@ -254,7 +266,7 @@ export async function analyzeNode(
     const userPrompt = buildUserPrompt(state.marketSnapshot, state.portfolio);
 
     const rawResponse = await callLLM(systemPrompt, userPrompt, config);
-    const thesis = parseLLMResponse(rawResponse, state.marketSnapshot, config);
+    const thesis = parseLLMResponse(rawResponse, state.marketSnapshot, config, state.portfolio);
 
     return { thesis };
   } catch (err) {

@@ -188,9 +188,7 @@ export class TradingWallet {
 
   /**
    * Transfers an SPL token to another address.
-   * Uses Helius RPC for ATA resolution.
-   *
-   * TODO: implement using @solana/spl-token createTransferInstruction
+   * Creates the destination ATA if it doesn't exist.
    */
   async transferSPL(
     mint: string,
@@ -198,10 +196,54 @@ export class TradingWallet {
     amount: number,
     decimals: number
   ): Promise<string> {
-    // TODO: implement SPL token transfer
-    // 1. Get or create destination ATA
-    // 2. Build transfer instruction
-    // 3. Sign and send
-    throw new Error('transferSPL not yet implemented');
+    const {
+      createTransferCheckedInstruction,
+      getOrCreateAssociatedTokenAccount,
+    } = await import('@solana/spl-token');
+
+    const mintPubkey = new PublicKey(mint);
+    const toPubkey = new PublicKey(toAddress);
+
+    // Resolve sender ATA
+    const senderAta = await getAssociatedTokenAddress(mintPubkey, this.keypair.publicKey);
+
+    // Get or create destination ATA
+    const destAta = await getOrCreateAssociatedTokenAccount(
+      this.connection,
+      this.keypair,
+      mintPubkey,
+      toPubkey
+    );
+
+    const rawAmount = BigInt(Math.floor(amount * 10 ** decimals));
+
+    const tx = new Transaction().add(
+      createTransferCheckedInstruction(
+        senderAta,
+        mintPubkey,
+        destAta.address,
+        this.keypair.publicKey,
+        rawAmount,
+        decimals
+      )
+    );
+
+    const { blockhash, lastValidBlockHeight } =
+      await this.connection.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = this.keypair.publicKey;
+    tx.sign(this.keypair);
+
+    const signature = await this.connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: false,
+    });
+
+    await this.connection.confirmTransaction(
+      { signature, blockhash, lastValidBlockHeight },
+      'confirmed'
+    );
+
+    logger.info(`SPL transfer ${mint} → ${toAddress}: ${signature}`);
+    return signature;
   }
 }

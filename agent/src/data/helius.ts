@@ -87,30 +87,52 @@ export class HeliusClient {
    * Returns parsed MarketEvent[] for whale trades and large transfers.
    */
   async getRecentEvents(limit = 50): Promise<MarketEvent[]> {
-    // TODO: implement using Helius /v0/addresses/{address}/transactions endpoint
-    // For now, return empty array — this will be populated with real impl
     try {
-      // Use a set of high-activity program IDs to detect DeFi activity
-      // (e.g., Raydium AMM, Orca, Jupiter aggregator)
+      // Fetch enhanced transactions from high-activity DeFi programs
       const programAddresses = [
         'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', // Jupiter v6
         '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // Raydium AMM v4
       ];
 
       const results: MarketEvent[] = [];
-      for (const address of programAddresses.slice(0, 1)) {
-        // TODO: replace with actual Helius enhanced transactions API call
-        // const response = await axios.get(
-        //   `${this.baseApiUrl}/addresses/${address}/transactions`,
-        //   { params: { api_key: this.apiKey, limit, type: 'SWAP' } }
-        // );
-        // const txs: HeliusEnhancedTransaction[] = response.data;
-        // results.push(...this.parseTransactionsToEvents(txs));
+      for (const address of programAddresses) {
+        try {
+          const response = await axios.get<HeliusEnhancedTransaction[]>(
+            `${this.baseApiUrl}/addresses/${address}/transactions`,
+            {
+              params: { 'api-key': this.apiKey, limit: Math.ceil(limit / programAddresses.length), type: 'SWAP' },
+              timeout: 10_000,
+            }
+          );
+          const txs = response.data;
+          if (Array.isArray(txs)) {
+            // Get SOL price for rough value estimates
+            const solPrice = await this.getSolPrice();
+            results.push(...this.parseTransactionsToEvents(txs, solPrice));
+          }
+        } catch (err) {
+          logger.debug(`getRecentEvents for ${address.slice(0, 8)}: ${err}`);
+        }
       }
-      return results;
+      return results.slice(0, limit);
     } catch (err) {
       logger.warn(`getRecentEvents failed: ${err}`);
       return [];
+    }
+  }
+
+  /**
+   * Quick SOL/USD price fetch for value estimates.
+   */
+  private async getSolPrice(): Promise<number> {
+    try {
+      const res = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+        params: { ids: 'solana', vs_currencies: 'usd' },
+        timeout: 5000,
+      });
+      return res.data?.solana?.usd ?? 150;
+    } catch {
+      return 150; // fallback
     }
   }
 
@@ -182,9 +204,31 @@ export class HeliusClient {
     programId: string,
     onEvent: (event: MarketEvent) => void
   ): Promise<() => void> {
-    // TODO: implement using this.connection.onLogs(new PublicKey(programId), ...)
-    // Filter for swap events above whale threshold and emit MarketEvents
-    logger.info(`[TODO] Subscribe to logs for program ${programId.slice(0, 8)}`);
-    return () => {}; // unsubscribe noop
+    const { PublicKey } = await import('@solana/web3.js');
+    const subId = this.connection.onLogs(
+      new PublicKey(programId),
+      (logs) => {
+        // Filter for swap-related log lines
+        const hasSwap = logs.logs.some(
+          (l) => l.includes('Swap') || l.includes('swap') || l.includes('Route')
+        );
+        if (hasSwap) {
+          onEvent({
+            type: 'whale_trade',
+            token: programId,
+            details: `Swap detected on ${programId.slice(0, 8)}`,
+            txSignature: logs.signature,
+            timestamp: Date.now(),
+          });
+        }
+      },
+      'confirmed'
+    );
+
+    logger.info(`Subscribed to logs for program ${programId.slice(0, 8)} (subId=${subId})`);
+    return () => {
+      this.connection.removeOnLogsListener(subId);
+      logger.info(`Unsubscribed from logs for ${programId.slice(0, 8)}`);
+    };
   }
 }

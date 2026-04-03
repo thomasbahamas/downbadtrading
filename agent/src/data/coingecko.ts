@@ -7,7 +7,7 @@
  */
 
 import axios from 'axios';
-import type { AgentConfig, GlobalMetrics } from '../types';
+import type { AgentConfig, GlobalMetrics, TokenData } from '../types';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('data/coingecko');
@@ -38,6 +38,20 @@ interface CoinGeckoPrice {
   };
 }
 
+interface CoinGeckoMarketItem {
+  id: string;
+  symbol: string;
+  name: string;
+  current_price: number | null;
+  market_cap: number | null;
+  total_volume: number | null;
+  price_change_percentage_24h: number | null;
+  price_change_percentage_1h_in_currency: number | null;
+  circulating_supply: number | null;
+  ath: number | null;
+  atl_date: string | null;
+}
+
 export class CoinGeckoClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -49,7 +63,7 @@ export class CoinGeckoClient {
 
   private get headers() {
     return {
-      'x-cg-pro-api-key': this.apiKey,
+      'x-cg-demo-api-key': this.apiKey,
     };
   }
 
@@ -57,23 +71,31 @@ export class CoinGeckoClient {
    * Returns global market metrics including SOL price, BTC dominance, etc.
    */
   async getGlobalMetrics(): Promise<GlobalMetrics> {
-    const [globalResp, priceResp, fearGreedResp] = await Promise.allSettled([
-      this.getGlobal(),
-      this.getPrices(['solana', 'bitcoin', 'ethereum']),
-      this.getFearGreedIndex(),
-    ]);
+    // Sequential calls to avoid CoinGecko rate limiting
+    const globalResp = await Promise.resolve().then(() => this.getGlobal()).then(
+      v => ({ status: 'fulfilled' as const, value: v }),
+      () => ({ status: 'rejected' as const })
+    );
+    const priceResp = await Promise.resolve().then(() => this.getPrices(['solana', 'bitcoin', 'ethereum'])).then(
+      v => ({ status: 'fulfilled' as const, value: v }),
+      () => ({ status: 'rejected' as const })
+    );
+    const fearGreedResp = await Promise.resolve().then(() => this.getFearGreedIndex()).then(
+      v => ({ status: 'fulfilled' as const, value: v }),
+      () => ({ status: 'rejected' as const })
+    );
 
-    const global = globalResp.status === 'fulfilled' ? globalResp.value : null;
+    const globalData = globalResp.status === 'fulfilled' ? globalResp.value : null;
     const prices = priceResp.status === 'fulfilled' ? priceResp.value : {};
     const fearGreed = fearGreedResp.status === 'fulfilled' ? fearGreedResp.value : 50;
 
     return {
       solPriceUsd: prices['solana']?.usd ?? 0,
       solVolume24h: prices['solana']?.usd_24h_vol ?? 0,
-      totalDexVolume24h: 0, // TODO: add DEX volume source
+      totalDexVolume24h: 0,
       fearGreedIndex: fearGreed,
-      btcDominancePct: global?.data.market_cap_percentage['btc'] ?? 40,
-      totalMarketCapUsd: global?.data.total_market_cap['usd'] ?? 0,
+      btcDominancePct: globalData?.data.market_cap_percentage['btc'] ?? 40,
+      totalMarketCapUsd: globalData?.data.total_market_cap['usd'] ?? 0,
     };
   }
 
@@ -97,12 +119,11 @@ export class CoinGeckoClient {
   /**
    * Global crypto market data (total market cap, volume, BTC dominance).
    */
-  async getGlobal(): Promise<CoinGeckoGlobal['data']> {
-    // TODO: implement using /global endpoint
+  async getGlobal(): Promise<CoinGeckoGlobal> {
     const response = await axios.get<CoinGeckoGlobal>(`${this.baseUrl}/global`, {
       headers: this.headers,
     });
-    return response.data.data;
+    return response.data;
   }
 
   /**
@@ -120,6 +141,62 @@ export class CoinGeckoClient {
     } catch (err) {
       logger.debug(`getFearGreedIndex failed: ${err}`);
       return 50; // Neutral fallback
+    }
+  }
+
+  /**
+   * Fetches top Solana ecosystem tokens by market cap from CoinGecko /coins/markets.
+   * Returns TokenData[] compatible with the agent's token universe.
+   */
+  async getSolanaTokenMarkets(limit = 30): Promise<TokenData[]> {
+    try {
+      // Fetch by specific Solana ecosystem coin IDs — more reliable than category filter
+      const solanaIds = [
+        'solana', 'jupiter-exchange-solana', 'raydium', 'orca', 'bonk',
+        'render-token', 'pyth-network', 'jito-governance-token', 'marinade',
+        'tensor', 'parcl', 'dogwifcoin', 'popcat', 'helium', 'hivemapper',
+        'sanctum-2', 'kamino', 'drift-protocol', 'marginfi', 'nosana',
+        'access-protocol', 'meanfi', 'star-atlas', 'stepn', 'audius',
+        'bonfida', 'serum', 'mango-markets', 'lido-staked-sol', 'jito-staked-sol',
+      ].slice(0, limit);
+
+      const response = await axios.get<CoinGeckoMarketItem[]>(
+        `${this.baseUrl}/coins/markets`,
+        {
+          params: {
+            vs_currency: 'usd',
+            ids: solanaIds.join(','),
+            order: 'volume_desc',
+            per_page: limit,
+            page: 1,
+            sparkline: false,
+            price_change_percentage: '1h,24h',
+          },
+          headers: this.headers,
+          timeout: 15_000,
+        }
+      );
+
+      const tokens: TokenData[] = response.data.map((coin) => ({
+        mint: coin.id, // CoinGecko ID — observe.ts maps these to mints
+        symbol: coin.symbol.toUpperCase(),
+        name: coin.name,
+        priceUsd: coin.current_price ?? 0,
+        priceChange1h: coin.price_change_percentage_1h_in_currency ?? 0,
+        priceChange24h: coin.price_change_percentage_24h ?? 0,
+        volume24h: coin.total_volume ?? 0,
+        volumeChange24h: 0,
+        marketCap: coin.market_cap ?? 0,
+        liquidity: coin.total_volume ?? 0, // rough proxy — CG doesn't expose on-chain liquidity
+        holderCount: 0,
+        createdAt: coin.atl_date ? new Date(coin.atl_date).getTime() : 0,
+      }));
+
+      logger.info(`getSolanaTokenMarkets: fetched ${tokens.length} tokens`);
+      return tokens;
+    } catch (err) {
+      logger.warn(`getSolanaTokenMarkets failed: ${err}`);
+      return [];
     }
   }
 

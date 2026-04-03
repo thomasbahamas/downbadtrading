@@ -1,19 +1,6 @@
-/**
- * Dashboard-specific types.
- * These mirror the agent's database row types.
- */
-
-export type TradeStatus =
-  | 'open'
-  | 'tp_hit'
-  | 'sl_hit'
-  | 'expired'
-  | 'manual_close'
-  | 'pending_approval';
-
 export interface Trade {
   id: string;
-  thesis_id: string | null;
+  thesis_id: string;
   token_symbol: string;
   token_mint: string;
   token_name: string | null;
@@ -23,11 +10,11 @@ export interface Trade {
   take_profit: number;
   stop_loss: number;
   position_size_usd: number;
-  entry_token_amount: number | null;
-  confidence_score: number | null;
+  entry_token_amount: number;
+  confidence_score: number;
   reasoning: string | null;
-  signals: Record<string, string> | null;
-  status: TradeStatus;
+  signals: Record<string, string>;
+  status: 'open' | 'tp_hit' | 'sl_hit' | 'expired' | 'manual_close' | 'pending_approval';
   jupiter_order_id: string | null;
   entry_tx: string | null;
   exit_tx: string | null;
@@ -58,16 +45,6 @@ export interface DailyPerformance {
   created_at: string;
 }
 
-export interface CircuitBreakerEvent {
-  id: string;
-  type: 'halt' | 'resume';
-  reason: string;
-  daily_loss_pct: number;
-  consecutive_losses: number;
-  drawdown_from_peak_pct: number;
-  created_at: string;
-}
-
 export interface TradeStats {
   total_closed: number;
   total_wins: number;
@@ -80,7 +57,7 @@ export interface TradeStats {
 }
 
 export interface AgentHealth {
-  status: 'ok' | 'error';
+  status: string;
   uptime: number;
   loopCount: number;
   paperTrade: boolean;

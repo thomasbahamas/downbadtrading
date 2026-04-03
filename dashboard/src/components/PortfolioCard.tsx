@@ -1,6 +1,6 @@
 'use client';
 
-interface PortfolioCardProps {
+interface Props {
   endingBalanceUsd: number;
   startingBalanceUsd: number;
   dailyPnl: number;
@@ -9,21 +9,24 @@ interface PortfolioCardProps {
   openPositions: number;
 }
 
-function fmt(n: number, decimals = 2): string {
-  return n.toLocaleString('en-US', {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
-}
-
-function pnlClass(n: number): string {
+function pnlColor(n: number): string {
   if (n > 0) return 'text-profit';
   if (n < 0) return 'text-loss';
   return 'text-gray-400';
 }
 
-function pnlSign(n: number): string {
-  return n > 0 ? '+' : '';
+function formatUsd(n: number): string {
+  return n.toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function formatPct(n: number): string {
+  const sign = n > 0 ? '+' : '';
+  return `${sign}${(n * 100).toFixed(2)}%`;
 }
 
 export default function PortfolioCard({
@@ -33,51 +36,44 @@ export default function PortfolioCard({
   dailyPnlPct,
   totalPnl,
   openPositions,
-}: PortfolioCardProps) {
+}: Props) {
   return (
     <div className="card h-full">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">
-            Portfolio Value
-          </p>
-          <p className="text-3xl font-semibold text-white tracking-tight">
-            ${fmt(endingBalanceUsd)}
-          </p>
-        </div>
-        <span className="badge bg-solana/15 text-solana-light text-xs">
-          {openPositions} open
-        </span>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-sm font-semibold text-white">Portfolio</h2>
+        <span className="text-xs text-gray-500">Today</span>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
-        {/* Daily P&L */}
-        <div className="bg-surface-2 rounded-lg p-3">
-          <p className="text-xs text-gray-500 mb-1">Today's P&L</p>
-          <p className={`text-lg font-semibold ${pnlClass(dailyPnl)}`}>
-            {pnlSign(dailyPnl)}${fmt(Math.abs(dailyPnl))}
-          </p>
-          <p className={`text-xs mt-0.5 ${pnlClass(dailyPnlPct)}`}>
-            {pnlSign(dailyPnlPct)}{fmt(Math.abs(dailyPnlPct))}%
+      {/* Balance */}
+      <div className="mb-4">
+        <p className="text-3xl font-bold text-white mono">
+          {formatUsd(endingBalanceUsd)}
+        </p>
+        <div className="flex items-center gap-2 mt-1">
+          <span className={`text-sm mono ${pnlColor(dailyPnl)}`}>
+            {dailyPnl >= 0 ? '+' : ''}{formatUsd(dailyPnl)}
+          </span>
+          <span className={`text-xs ${pnlColor(dailyPnlPct)}`}>
+            ({formatPct(dailyPnlPct)})
+          </span>
+        </div>
+      </div>
+
+      {/* Stats row */}
+      <div className="grid grid-cols-3 gap-3 pt-3 border-t border-surface-border">
+        <div>
+          <p className="text-xs text-gray-500 mb-0.5">Start of Day</p>
+          <p className="text-sm mono text-gray-300">{formatUsd(startingBalanceUsd)}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500 mb-0.5">Total P&L</p>
+          <p className={`text-sm mono ${pnlColor(totalPnl)}`}>
+            {totalPnl >= 0 ? '+' : ''}{formatUsd(totalPnl)}
           </p>
         </div>
-
-        {/* Total P&L */}
-        <div className="bg-surface-2 rounded-lg p-3">
-          <p className="text-xs text-gray-500 mb-1">Total P&L</p>
-          <p className={`text-lg font-semibold ${pnlClass(totalPnl)}`}>
-            {pnlSign(totalPnl)}${fmt(Math.abs(totalPnl))}
-          </p>
-          <p className="text-xs text-gray-500 mt-0.5">all-time</p>
-        </div>
-
-        {/* Starting balance */}
-        <div className="bg-surface-2 rounded-lg p-3">
-          <p className="text-xs text-gray-500 mb-1">Start of Day</p>
-          <p className="text-lg font-semibold text-white">
-            ${fmt(startingBalanceUsd)}
-          </p>
-          <p className="text-xs text-gray-500 mt-0.5">base capital</p>
+        <div>
+          <p className="text-xs text-gray-500 mb-0.5">Open Positions</p>
+          <p className="text-sm mono text-white">{openPositions}</p>
         </div>
       </div>
     </div>

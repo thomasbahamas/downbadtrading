@@ -72,25 +72,43 @@ export class ProfitRouter {
 
   /**
    * Transfers USDC equivalent of profit to the profit wallet.
-   *
-   * TODO: implement proper SPL transfer once TradingWallet.transferSPL is implemented.
-   * Currently transfers SOL equivalent as a fallback.
+   * Falls back to SOL transfer if USDC balance is insufficient.
    */
   private async transferProfitAsUSDC(profitUsd: number): Promise<string> {
-    // TODO: implement USDC SPL transfer
-    // For now, log what we would transfer and return a placeholder
-    // 1. Check USDC balance >= profitUsd
-    // 2. Call wallet.transferSPL(USDC_MINT, profitWalletAddress, profitUsd, 6)
+    const portfolio = await this.wallet.getPortfolio();
 
-    // Temporary: transfer SOL equivalent
-    // In production, resolve SOL/USD price and transfer exact SOL
-    logger.warn('USDC transfer not yet implemented; SOL transfer used as placeholder');
+    // Try USDC first (1 USDC ≈ $1)
+    if (portfolio.usdcBalance >= profitUsd) {
+      logger.info(`Routing $${profitUsd.toFixed(2)} as USDC`);
+      return this.wallet.transferSPL(USDC_MINT, this.profitWalletAddress, profitUsd, 6);
+    }
 
-    // TODO: replace with actual SOL price lookup
-    const solPrice = 100; // placeholder
-    const solAmount = profitUsd / solPrice;
+    // Fallback to SOL using on-chain SOL price from portfolio context
+    // We use the SOL balance and a conservative estimate
+    if (portfolio.solBalance > 0.01) {
+      logger.info(`Insufficient USDC ($${portfolio.usdcBalance.toFixed(2)}), routing as SOL`);
+      // Fetch current SOL price from CoinGecko simple/price as a quick lookup
+      const axios = (await import('axios')).default;
+      let solPrice = 150; // conservative fallback
+      try {
+        const res = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+          params: { ids: 'solana', vs_currencies: 'usd' },
+          timeout: 5000,
+        });
+        solPrice = res.data?.solana?.usd ?? solPrice;
+      } catch {
+        logger.warn('SOL price lookup failed, using fallback');
+      }
 
-    const sig = await this.wallet.transferSOL(this.profitWalletAddress, solAmount);
-    return sig;
+      const solAmount = profitUsd / solPrice;
+      if (solAmount > portfolio.solBalance - 0.01) {
+        logger.warn(`Insufficient SOL for full profit route (need ${solAmount.toFixed(4)}, have ${portfolio.solBalance.toFixed(4)})`);
+        return this.wallet.transferSOL(this.profitWalletAddress, portfolio.solBalance - 0.01);
+      }
+
+      return this.wallet.transferSOL(this.profitWalletAddress, solAmount);
+    }
+
+    throw new Error('Insufficient USDC and SOL balance for profit routing');
   }
 }

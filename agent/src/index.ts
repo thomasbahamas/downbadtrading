@@ -86,11 +86,12 @@ async function runLoop(): Promise<void> {
 
     try {
       logger.info(`--- Loop #${globalLoopCount} ---`);
-      agentState = await graph.invoke({
+      const result = await graph.invoke({
         ...agentState,
         loopCount: globalLoopCount,
         error: null,
       });
+      agentState = result as unknown as import('./types').AgentState;
 
       if (agentState.error) {
         logger.error(`Loop #${globalLoopCount} completed with error: ${agentState.error}`);
