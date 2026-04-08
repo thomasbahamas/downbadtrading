@@ -148,52 +148,60 @@ export class CoinGeckoClient {
    * Fetches top Solana ecosystem tokens by market cap from CoinGecko /coins/markets.
    * Returns TokenData[] compatible with the agent's token universe.
    */
-  async getSolanaTokenMarkets(limit = 30): Promise<TokenData[]> {
+  async getSolanaTokenMarkets(limit = 100): Promise<TokenData[]> {
     try {
-      // Fetch by specific Solana ecosystem coin IDs — more reliable than category filter
-      const solanaIds = [
-        'solana', 'jupiter-exchange-solana', 'raydium', 'orca', 'bonk',
-        'render-token', 'pyth-network', 'jito-governance-token', 'marinade',
-        'tensor', 'parcl', 'dogwifcoin', 'popcat', 'helium', 'hivemapper',
-        'sanctum-2', 'kamino', 'drift-protocol', 'marginfi', 'nosana',
-        'access-protocol', 'meanfi', 'star-atlas', 'stepn', 'audius',
-        'bonfida', 'serum', 'mango-markets', 'lido-staked-sol', 'jito-staked-sol',
-      ].slice(0, limit);
+      // Fetch Solana ecosystem tokens by category — CoinGecko's category filter
+      // gives us 100+ tokens sorted by volume, much broader than a hardcoded list
+      const allTokens: TokenData[] = [];
+      const pages = Math.ceil(limit / 100); // CoinGecko max per_page is 250
 
-      const response = await axios.get<CoinGeckoMarketItem[]>(
-        `${this.baseUrl}/coins/markets`,
-        {
-          params: {
-            vs_currency: 'usd',
-            ids: solanaIds.join(','),
-            order: 'volume_desc',
-            per_page: limit,
-            page: 1,
-            sparkline: false,
-            price_change_percentage: '1h,24h',
-          },
-          headers: this.headers,
-          timeout: 15_000,
-        }
-      );
+      for (let page = 1; page <= pages; page++) {
+        const perPage = Math.min(100, limit - allTokens.length);
+        const response = await axios.get<CoinGeckoMarketItem[]>(
+          `${this.baseUrl}/coins/markets`,
+          {
+            params: {
+              vs_currency: 'usd',
+              category: 'solana-ecosystem',
+              order: 'volume_desc',
+              per_page: perPage,
+              page,
+              sparkline: false,
+              price_change_percentage: '1h,24h',
+            },
+            headers: this.headers,
+            timeout: 15_000,
+          }
+        );
 
-      const tokens: TokenData[] = response.data.map((coin) => ({
-        mint: coin.id, // CoinGecko ID — observe.ts maps these to mints
-        symbol: coin.symbol.toUpperCase(),
-        name: coin.name,
-        priceUsd: coin.current_price ?? 0,
-        priceChange1h: coin.price_change_percentage_1h_in_currency ?? 0,
-        priceChange24h: coin.price_change_percentage_24h ?? 0,
-        volume24h: coin.total_volume ?? 0,
-        volumeChange24h: 0,
-        marketCap: coin.market_cap ?? 0,
-        liquidity: coin.total_volume ?? 0, // rough proxy — CG doesn't expose on-chain liquidity
-        holderCount: 0,
-        createdAt: coin.atl_date ? new Date(coin.atl_date).getTime() : 0,
-      }));
+        if (!response.data || response.data.length === 0) break;
 
-      logger.info(`getSolanaTokenMarkets: fetched ${tokens.length} tokens`);
-      return tokens;
+        const tokens: TokenData[] = response.data.map((coin) => ({
+          mint: coin.id, // CoinGecko ID — observe.ts maps these to mints
+          symbol: coin.symbol.toUpperCase(),
+          name: coin.name,
+          priceUsd: coin.current_price ?? 0,
+          priceChange1h: coin.price_change_percentage_1h_in_currency ?? 0,
+          priceChange24h: coin.price_change_percentage_24h ?? 0,
+          volume24h: coin.total_volume ?? 0,
+          volumeChange24h: 0,
+          marketCap: coin.market_cap ?? 0,
+          liquidity: coin.total_volume ?? 0, // rough proxy — CG doesn't expose on-chain liquidity
+          holderCount: 0,
+          createdAt: coin.atl_date ? new Date(coin.atl_date).getTime() : 0,
+        }));
+
+        allTokens.push(...tokens);
+
+        // Rate limit: CoinGecko free tier allows ~10-30 req/min
+        if (page < pages) await new Promise((r) => setTimeout(r, 1500));
+      }
+
+      // Filter out tokens with negligible volume
+      const filtered = allTokens.filter((t) => t.volume24h >= 10_000);
+
+      logger.info(`getSolanaTokenMarkets: fetched ${allTokens.length} tokens, ${filtered.length} with >$10K volume`);
+      return filtered;
     } catch (err) {
       logger.warn(`getSolanaTokenMarkets failed: ${err}`);
       return [];

@@ -10,12 +10,13 @@
  * Returns: { marketSnapshot, portfolio }
  */
 
-import type { AgentState, AgentConfig, MarketSnapshot, TokenData, Portfolio } from '../types';
+import type { AgentState, AgentConfig, MarketSnapshot, TokenData, Portfolio, Position } from '../types';
 import { CoinGeckoClient } from '../data/coingecko';
 import { PythClient } from '../data/pyth';
 import { HeliusClient } from '../data/helius';
 import { scanCEXListings } from '../data/cex-listings';
 import { TradingWallet } from '../wallet/trading';
+import { TradeRepository } from '../db/trades';
 import { logActivity } from '../db/activity';
 import { createLogger } from '../utils/logger';
 
@@ -62,12 +63,25 @@ export async function observeNode(
   const pyth = new PythClient(config);
   const helius = new HeliusClient(config);
   const wallet = new TradingWallet(config);
+  const db = new TradeRepository(config);
 
   try {
+    // ── Sync open positions from Supabase (source of truth) ───────────
+    // This ensures deleted/closed positions don't linger in memory
+    let syncedPositions: Position[] = state.activePositions;
+    try {
+      syncedPositions = await db.getOpenPositions();
+      if (syncedPositions.length !== state.activePositions.length) {
+        logger.info(`OBSERVE: synced positions from DB — ${syncedPositions.length} open (was ${state.activePositions.length} in memory)`);
+      }
+    } catch (syncErr) {
+      logger.debug(`OBSERVE: position sync failed, using in-memory state: ${syncErr instanceof Error ? syncErr.message : String(syncErr)}`);
+    }
+
     // ── Run data fetches in parallel ────────────────────────────────────
     const [portfolio, cgTokens, globalMetrics, recentEvents, cexListings] = await Promise.allSettled([
       fetchPortfolio(wallet),
-      coingecko.getSolanaTokenMarkets(30),
+      coingecko.getSolanaTokenMarkets(100),
       coingecko.getGlobalMetrics(),
       helius.getRecentEvents(50),
       scanCEXListings(),
@@ -156,6 +170,7 @@ export async function observeNode(
     return {
       marketSnapshot: snapshot,
       portfolio: resolvedPortfolio,
+      activePositions: syncedPositions,
       lastObserveTime: Date.now(),
     };
   } catch (err) {
