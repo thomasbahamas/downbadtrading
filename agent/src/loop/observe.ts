@@ -132,7 +132,7 @@ export async function observeNode(
     }
 
     await logActivity(config, 'scan',
-      `Scanned ${tokenDataWithPyth.length} Solana tokens across 4 exchanges`,
+      `Scanned ${tokenDataWithPyth.length} Solana tokens across 5 exchanges`,
       `${resolvedEvents.length} on-chain events, ${resolvedListings.length} new listings`
     );
 

@@ -59,7 +59,7 @@ export default async function DashboardPage() {
         openPositions={positions.length}
         winRate={stats?.win_rate ?? 0}
         totalPnl={totalRealizedPnl}
-        exchangesMonitored={4}
+        exchangesMonitored={5}
       />
 
       {/* Top row: portfolio + agent status + live feed */}

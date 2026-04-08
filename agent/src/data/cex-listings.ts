@@ -1,7 +1,7 @@
 /**
  * cex-listings.ts — CEX listing scanner.
  *
- * Polls Binance, Coinbase, Backpack, and Gemini for new trading pairs.
+ * Polls Binance, Coinbase, Robinhood, Backpack, and Gemini for new trading pairs.
  * On first run, sets baseline. Subsequent runs detect new additions.
  * New listings are passed to the LLM as high-priority buy signals.
  */
@@ -37,6 +37,7 @@ export async function scanCEXListings(): Promise<CEXListing[]> {
   const scanners: [string, () => Promise<SymbolInfo[]>][] = [
     ['binance', fetchBinanceSymbols],
     ['coinbase', fetchCoinbaseProducts],
+    ['robinhood', fetchRobinhoodCrypto],
     ['backpack', fetchBackpackMarkets],
     ['gemini', fetchGeminiSymbols],
   ];
@@ -113,6 +114,32 @@ async function fetchCoinbaseProducts(): Promise<SymbolInfo[]> {
       baseAsset: String(p.base_currency),
       quoteAsset: String(p.quote_currency),
     }));
+}
+
+async function fetchRobinhoodCrypto(): Promise<SymbolInfo[]> {
+  // Fetch first page — Robinhood may paginate
+  const firstPage = await axios.get('https://nummus.robinhood.com/currency_pairs/', {
+    timeout: 10_000,
+    headers: { 'User-Agent': 'DownbadTrading/1.0' },
+  });
+
+  const results: Record<string, unknown>[] = firstPage.data?.results ?? [];
+
+  // Follow pagination if present (typically just 1 page for crypto)
+  let nextUrl: string | undefined = firstPage.data?.next;
+  while (nextUrl) {
+    const page = await axios.get(nextUrl, { timeout: 10_000, headers: { 'User-Agent': 'DownbadTrading/1.0' } });
+    results.push(...(page.data?.results ?? []));
+    nextUrl = page.data?.next;
+  }
+
+  return results.map((pair) => {
+    const ac = pair.asset_currency as Record<string, string> | undefined;
+    const qc = pair.quote_currency as Record<string, string> | undefined;
+    const base = (ac?.code ?? String(pair.symbol ?? '')).toUpperCase();
+    const quote = (qc?.code ?? 'USD').toUpperCase();
+    return { symbol: `${base}-${quote}`, baseAsset: base, quoteAsset: quote };
+  }).filter((s) => s.baseAsset.length > 0);
 }
 
 async function fetchBackpackMarkets(): Promise<SymbolInfo[]> {
