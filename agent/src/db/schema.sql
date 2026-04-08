@@ -138,6 +138,23 @@ CREATE INDEX idx_daily_performance_date ON daily_performance(date DESC);
 
 
 -- =============================================================
+-- agent_activity — Live feed of agent actions
+-- =============================================================
+CREATE TABLE IF NOT EXISTS agent_activity (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    type            TEXT NOT NULL,
+    title           TEXT NOT NULL,
+    details         TEXT,
+    token_symbol    TEXT,
+    metadata        JSONB DEFAULT '{}',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_agent_activity_created_at ON agent_activity(created_at DESC);
+CREATE INDEX idx_agent_activity_type       ON agent_activity(type);
+
+
+-- =============================================================
 -- Row Level Security (for dashboard access)
 -- =============================================================
 
@@ -147,6 +164,7 @@ ALTER TABLE theses                  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE circuit_breaker_events  ENABLE ROW LEVEL SECURITY;
 ALTER TABLE circuit_breaker_state   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE daily_performance       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_activity          ENABLE ROW LEVEL SECURITY;
 
 -- Allow anonymous read-only access (for the dashboard using anon key)
 -- Restrict to SELECT only — anon key cannot write
@@ -164,6 +182,9 @@ CREATE POLICY "anon_select_cb_state"
 
 CREATE POLICY "anon_select_daily_performance"
     ON daily_performance FOR SELECT USING (TRUE);
+
+CREATE POLICY "anon_select_agent_activity"
+    ON agent_activity FOR SELECT USING (TRUE);
 
 -- Service role (agent) can do everything (bypasses RLS by default)
 

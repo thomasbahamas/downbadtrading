@@ -12,6 +12,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { v4 as uuidv4 } from 'uuid';
 import type { AgentState, AgentConfig, TradeThesis, MarketSnapshot, Portfolio } from '../types';
+import { logActivity } from '../db/activity';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('analyze');
@@ -284,6 +285,14 @@ export async function analyzeNode(
 
     const rawResponse = await callLLM(systemPrompt, userPrompt, config);
     const thesis = parseLLMResponse(rawResponse, state.marketSnapshot, config, state.portfolio);
+
+    if (thesis) {
+      await logActivity(config, 'thesis',
+        `Generated thesis: BUY ${thesis.token.symbol} @ $${thesis.entryPriceUsd.toFixed(4)}`,
+        thesis.reasoning, thesis.token.symbol,
+        { confidence: thesis.confidenceScore, rr: thesis.riskRewardRatio, tp: thesis.takeProfitUsd, sl: thesis.stopLossUsd }
+      );
+    }
 
     return { thesis };
   } catch (err) {

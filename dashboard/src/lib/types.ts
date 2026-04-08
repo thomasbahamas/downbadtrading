@@ -63,3 +63,13 @@ export interface AgentHealth {
   paperTrade: boolean;
   timestamp: string;
 }
+
+export interface AgentActivity {
+  id: string;
+  type: string;
+  title: string;
+  details: string | null;
+  token_symbol: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}

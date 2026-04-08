@@ -22,6 +22,7 @@ import { ProfitRouter } from '../wallet/profit-router';
 import { CircuitBreakerService } from '../risk/circuit-breakers';
 import { TelegramClient } from '../notifications/telegram';
 import { TradeRepository } from '../db/trades';
+import { logActivity } from '../db/activity';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('monitor');
@@ -238,6 +239,14 @@ async function handlePositionClose(
 
   logger.info(
     `MONITOR: position closed — ${position.token.symbol} ${position.status} pnl=${pnlStr}`
+  );
+
+  const activityLabel = position.status === 'tp_hit' ? 'TP Hit' : position.status === 'sl_hit' ? 'SL Hit' : position.status;
+  await logActivity(config, 'position_close',
+    `${isWin ? 'Win' : 'Loss'}: ${position.token.symbol} ${activityLabel} (${pnlStr})`,
+    `Entry: $${position.entryPriceUsd.toFixed(4)} → Exit: $${(position.exitPriceUsd ?? 0).toFixed(4)}`,
+    position.token.symbol,
+    { pnl: position.realizedPnl, pnlPct: position.realizedPnlPct, status: position.status }
   );
 
   await db.updatePosition(position);

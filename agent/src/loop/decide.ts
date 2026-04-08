@@ -10,6 +10,7 @@
 import type { AgentState, AgentConfig, RiskApproval } from '../types';
 import { RiskEngine } from '../risk/engine';
 import { CircuitBreakerService } from '../risk/circuit-breakers';
+import { logActivity } from '../db/activity';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('decide');
@@ -76,8 +77,17 @@ export async function decideNode(
           `autoExecute=${approval.autoExecute} ` +
           `warnings=${approval.warnings.length}`
       );
+      await logActivity(config, 'executed',
+        `Approved: BUY $${positionSize.toFixed(0)} of ${state.thesis.token.symbol}`,
+        approval.warnings.length > 0 ? `Warnings: ${approval.warnings.join(', ')}` : undefined,
+        state.thesis.token.symbol
+      );
     } else {
       logger.info(`DECIDE: rejected — ${approval.reason}`);
+      await logActivity(config, 'rejected',
+        `Rejected: ${state.thesis.token.symbol} — ${approval.reason}`,
+        undefined, state.thesis.token.symbol
+      );
     }
 
     return { riskApproval: approval };

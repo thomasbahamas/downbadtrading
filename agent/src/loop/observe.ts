@@ -16,6 +16,7 @@ import { PythClient } from '../data/pyth';
 import { HeliusClient } from '../data/helius';
 import { scanCEXListings } from '../data/cex-listings';
 import { TradingWallet } from '../wallet/trading';
+import { logActivity } from '../db/activity';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('observe');
@@ -121,7 +122,19 @@ export async function observeNode(
 
     if (resolvedListings.length > 0) {
       logger.info(`OBSERVE: ${resolvedListings.length} new CEX listing(s) detected!`);
+      for (const listing of resolvedListings) {
+        await logActivity(config, 'listing',
+          `New listing: ${listing.exchange} added ${listing.baseAsset}/${listing.quoteAsset}`,
+          undefined, listing.baseAsset,
+          { exchange: listing.exchange, quoteAsset: listing.quoteAsset }
+        );
+      }
     }
+
+    await logActivity(config, 'scan',
+      `Scanned ${tokenDataWithPyth.length} Solana tokens across 4 exchanges`,
+      `${resolvedEvents.length} on-chain events, ${resolvedListings.length} new listings`
+    );
 
     const snapshot: MarketSnapshot = {
       timestamp: Date.now(),

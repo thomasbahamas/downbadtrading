@@ -1,138 +1,128 @@
 import { supabase } from '@/lib/supabase';
-import type { Trade, TradeStats } from '@/lib/types';
+import type { Trade, TradeStats, AgentActivity } from '@/lib/types';
 import PortfolioCard from '@/components/PortfolioCard';
 import ActivePositions from '@/components/ActivePositions';
 import AgentStatus from '@/components/AgentStatus';
-import PerformanceMetrics from '@/components/PerformanceMetrics';
+import StatsBar from '@/components/StatsBar';
+import LiveFeed from '@/components/LiveFeed';
+import EquityCurve from '@/components/EquityCurve';
 
 // Always fetch fresh data
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 async function getData() {
-  // Fetch open positions
-  const { data: positions, error: posErr } = await supabase
-    .from('trades')
-    .select('*')
-    .eq('status', 'open')
-    .order('opened_at', { ascending: false });
-
-  if (posErr) console.error('Dashboard: positions query failed:', posErr.message);
-
-  // Fetch trade stats (view)
-  const { data: stats, error: statsErr } = await supabase
-    .from('trade_stats')
-    .select('*')
-    .single();
-
-  if (statsErr) console.error('Dashboard: trade_stats query failed:', statsErr.message);
-
-  // Fetch ALL recent trades for display
-  const { data: recentTrades, error: recentErr } = await supabase
-    .from('trades')
-    .select('*')
-    .order('opened_at', { ascending: false })
-    .limit(20);
-
-  if (recentErr) console.error('Dashboard: recent trades query failed:', recentErr.message);
-
-  // Fetch closed trades for PnL calculation
-  const { data: closedTrades, error: closedErr } = await supabase
-    .from('trades')
-    .select('realized_pnl, realized_pnl_pct, closed_at, position_size_usd')
-    .neq('status', 'open')
-    .neq('status', 'pending_approval')
-    .not('realized_pnl', 'is', null);
-
-  if (closedErr) console.error('Dashboard: closed trades query failed:', closedErr.message);
+  // Run all queries in parallel
+  const [positionsRes, statsRes, recentRes, closedRes, activityRes] = await Promise.all([
+    supabase.from('trades').select('*').eq('status', 'open').order('opened_at', { ascending: false }),
+    supabase.from('trade_stats').select('*').single(),
+    supabase.from('trades').select('*').order('opened_at', { ascending: false }).limit(20),
+    supabase.from('trades').select('realized_pnl, realized_pnl_pct, closed_at, position_size_usd').neq('status', 'open').neq('status', 'pending_approval').not('realized_pnl', 'is', null),
+    supabase.from('agent_activity').select('*').order('created_at', { ascending: false }).limit(30),
+  ]);
 
   return {
-    positions: (positions as Trade[]) ?? [],
-    stats: (stats as TradeStats) ?? null,
-    recentTrades: (recentTrades as Trade[]) ?? [],
-    closedTrades: closedTrades ?? [],
+    positions: (positionsRes.data as Trade[]) ?? [],
+    stats: (statsRes.data as TradeStats) ?? null,
+    recentTrades: (recentRes.data as Trade[]) ?? [],
+    closedTrades: closedRes.data ?? [],
+    activities: (activityRes.data as AgentActivity[]) ?? [],
   };
 }
 
 export default async function DashboardPage() {
-  const { positions, stats, recentTrades, closedTrades } = await getData();
+  const { positions, stats, recentTrades, closedTrades, activities } = await getData();
 
   // Compute portfolio metrics from trades data
   const deployedCapital = positions.reduce((sum, p) => sum + Number(p.position_size_usd), 0);
-  const totalRealizedPnl = closedTrades.reduce(
-    (sum, t) => sum + Number(t.realized_pnl ?? 0), 0
-  );
+  const totalRealizedPnl = closedTrades.reduce((sum, t) => sum + Number(t.realized_pnl ?? 0), 0);
 
   // Today's PnL
   const today = new Date().toISOString().slice(0, 10);
-  const todaysClosed = closedTrades.filter(
-    (t) => t.closed_at && String(t.closed_at).startsWith(today)
-  );
+  const todaysClosed = closedTrades.filter((t) => t.closed_at && String(t.closed_at).startsWith(today));
   const todayPnl = todaysClosed.reduce((sum, t) => sum + Number(t.realized_pnl ?? 0), 0);
   const todayPnlPct = deployedCapital > 0 ? todayPnl / deployedCapital : 0;
 
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div className="space-y-5 animate-fade-in">
       {/* Page header */}
       <div>
-        <h1 className="text-xl font-semibold text-white">Dashboard</h1>
+        <h1 className="text-xl font-semibold text-white">DownBad Trading</h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          Live portfolio overview · auto-refreshes every 30s
+          Autonomous Solana trading agent — all trades executed by AI
         </p>
       </div>
 
-      {/* Top row: portfolio + agent status */}
+      {/* Stats bar */}
+      <StatsBar
+        totalTrades={recentTrades.length}
+        openPositions={positions.length}
+        winRate={stats?.win_rate ?? 0}
+        totalPnl={totalRealizedPnl}
+        exchangesMonitored={4}
+      />
+
+      {/* Top row: portfolio + agent status + live feed */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="md:col-span-2">
-          <PortfolioCard
-            deployedCapital={deployedCapital}
-            dailyPnl={todayPnl}
-            dailyPnlPct={todayPnlPct}
-            totalPnl={totalRealizedPnl}
-            openPositions={positions.length}
-            totalTrades={recentTrades.length}
-          />
-        </div>
+        <PortfolioCard
+          deployedCapital={deployedCapital}
+          dailyPnl={todayPnl}
+          dailyPnlPct={todayPnlPct}
+          totalPnl={totalRealizedPnl}
+          openPositions={positions.length}
+          totalTrades={recentTrades.length}
+        />
         <AgentStatus />
+        <LiveFeed initialActivities={activities} />
       </div>
 
-      {/* Performance metrics */}
-      {stats && stats.total_closed > 0 && (
-        <PerformanceMetrics stats={stats} />
-      )}
+      {/* Equity curve */}
+      <EquityCurve trades={recentTrades} />
 
-      {/* Active positions */}
+      {/* Active positions with reasoning */}
       <ActivePositions positions={positions} />
 
       {/* Recent trades */}
       {recentTrades.length > 0 && (
         <div className="card">
-          <h2 className="text-lg font-semibold text-white mb-4">Recent Trades</h2>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-white">Recent Trades</h2>
+            <a href="/trades" className="text-xs text-gray-500 hover:text-solana-light transition-colors">
+              View all
+            </a>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-gray-500 border-b border-gray-800">
                   <th className="text-left pb-2">Token</th>
+                  <th className="text-left pb-2">Why</th>
                   <th className="text-right pb-2">Entry</th>
                   <th className="text-right pb-2">Size</th>
-                  <th className="text-right pb-2">TP / SL</th>
                   <th className="text-right pb-2">Status</th>
                   <th className="text-right pb-2">P&L</th>
                   <th className="text-right pb-2">Time</th>
                 </tr>
               </thead>
               <tbody>
-                {recentTrades.map((t) => (
+                {recentTrades.slice(0, 10).map((t) => (
                   <tr key={t.id} className="border-b border-gray-800/50 hover:bg-surface-2/50">
-                    <td className="py-2 text-white font-medium">{t.token_symbol}</td>
-                    <td className="py-2 text-right text-gray-300">
+                    <td className="py-2 text-white font-medium">
+                      {t.token_symbol}
+                      {t.confidence_score > 0 && (
+                        <span className="text-xs text-gray-600 ml-1">
+                          {(t.confidence_score * 100).toFixed(0)}%
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 text-xs text-gray-500 max-w-48 truncate">
+                      {t.reasoning || '--'}
+                    </td>
+                    <td className="py-2 text-right text-gray-300 mono text-xs">
                       ${Number(t.entry_price).toFixed(4)}
                     </td>
-                    <td className="py-2 text-right text-gray-300">
+                    <td className="py-2 text-right text-gray-300 mono text-xs">
                       ${Number(t.position_size_usd).toFixed(0)}
-                    </td>
-                    <td className="py-2 text-right text-gray-400 text-xs">
-                      ${Number(t.take_profit).toFixed(4)} / ${Number(t.stop_loss).toFixed(4)}
                     </td>
                     <td className="py-2 text-right">
                       <span className={`badge ${
@@ -144,7 +134,7 @@ export default async function DashboardPage() {
                         {t.status}
                       </span>
                     </td>
-                    <td className={`py-2 text-right ${
+                    <td className={`py-2 text-right mono text-xs ${
                       (t.realized_pnl ?? 0) > 0 ? 'text-green-400' :
                       (t.realized_pnl ?? 0) < 0 ? 'text-red-400' : 'text-gray-500'
                     }`}>
