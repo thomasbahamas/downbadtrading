@@ -1,5 +1,8 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+import { supabase } from '@/lib/supabase';
+
 interface Props {
   deployedCapital: number;
   dailyPnl: number;
@@ -7,6 +10,12 @@ interface Props {
   totalPnl: number;
   openPositions: number;
   totalTrades: number;
+}
+
+interface HeartbeatWallet {
+  portfolioValueUsd: number;
+  usdcBalance: number;
+  solBalance: number;
 }
 
 function pnlColor(n: number): string {
@@ -37,6 +46,27 @@ export default function PortfolioCard({
   openPositions,
   totalTrades,
 }: Props) {
+  const [wallet, setWallet] = useState<HeartbeatWallet | null>(null);
+
+  useEffect(() => {
+    const fetch = async () => {
+      const { data } = await supabase
+        .from('circuit_breaker_state')
+        .select('value')
+        .eq('key', 'agent_heartbeat')
+        .single();
+      if (data?.value) {
+        const v = data.value as HeartbeatWallet;
+        if (v.portfolioValueUsd != null) setWallet(v);
+      }
+    };
+    void fetch();
+    const interval = setInterval(fetch, 30_000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const totalValue = wallet?.portfolioValueUsd ?? deployedCapital;
+
   return (
     <div className="card h-full">
       <div className="flex items-center justify-between mb-4">
@@ -44,12 +74,19 @@ export default function PortfolioCard({
         <span className="text-xs text-gray-500">Live</span>
       </div>
 
-      {/* Deployed capital */}
+      {/* Total portfolio value */}
       <div className="mb-4">
         <p className="text-3xl font-bold text-white mono">
-          {formatUsd(deployedCapital)}
+          {formatUsd(totalValue)}
         </p>
-        <p className="text-xs text-gray-500 mt-0.5">Capital deployed in open positions</p>
+        <p className="text-xs text-gray-500 mt-0.5">
+          {deployedCapital > 0 ? `${formatUsd(deployedCapital)} deployed` : 'Total wallet value'}
+        </p>
+        {wallet && wallet.usdcBalance > 0 && (
+          <p className="text-xs text-gray-600 mt-0.5">
+            {formatUsd(wallet.usdcBalance)} USDC + {wallet.solBalance.toFixed(4)} SOL
+          </p>
+        )}
         {dailyPnl !== 0 && (
           <div className="flex items-center gap-2 mt-1">
             <span className={`text-sm mono ${pnlColor(dailyPnl)}`}>

@@ -149,24 +149,29 @@ export class RiskEngine {
     }
 
     // ── 12. Single token exposure cap ────────────────────────────────
+    // When portfolio value is too small for percentage-based limits (e.g. paper trade
+    // or near-empty wallet), skip percentage checks and rely on absolute limits above.
     const existingTokenExposure = activePositions
       .filter((p) => p.token.mint === thesis.token.mint)
       .reduce((sum, p) => sum + p.entrySizeUsd, 0);
-    const maxSingleTokenUsd =
-      (this.config.maxSingleTokenPct / 100) * portfolio.totalValueUsd;
 
-    if (existingTokenExposure + requestedSizeUsd > maxSingleTokenUsd) {
-      const allowed = Math.max(0, maxSingleTokenUsd - existingTokenExposure);
-      if (allowed < JUPITER_MIN_ORDER_USD) {
-        return this.reject(
-          `Single token exposure limit reached for ${thesis.token.symbol}`,
-          warnings
+    if (portfolio.totalValueUsd >= JUPITER_MIN_ORDER_USD) {
+      const maxSingleTokenUsd =
+        (this.config.maxSingleTokenPct / 100) * portfolio.totalValueUsd;
+
+      if (existingTokenExposure + requestedSizeUsd > maxSingleTokenUsd) {
+        const allowed = Math.max(0, maxSingleTokenUsd - existingTokenExposure);
+        if (allowed < JUPITER_MIN_ORDER_USD) {
+          return this.reject(
+            `Single token exposure limit reached for ${thesis.token.symbol}`,
+            warnings
+          );
+        }
+        warnings.push(
+          `Position reduced to $${allowed.toFixed(0)} due to single token exposure cap`
         );
+        requestedSizeUsd = allowed;
       }
-      warnings.push(
-        `Position reduced to $${allowed.toFixed(0)} due to single token exposure cap`
-      );
-      requestedSizeUsd = allowed;
     }
 
     // ── 13. Portfolio exposure cap ────────────────────────────────────
@@ -174,21 +179,24 @@ export class RiskEngine {
       (sum, p) => sum + p.entrySizeUsd,
       0
     );
-    const maxPortfolioExposureUsd =
-      (this.config.maxPortfolioExposurePct / 100) * portfolio.totalValueUsd;
 
-    if (totalOpenExposure + requestedSizeUsd > maxPortfolioExposureUsd) {
-      const allowed = Math.max(0, maxPortfolioExposureUsd - totalOpenExposure);
-      if (allowed < JUPITER_MIN_ORDER_USD) {
-        return this.reject(
-          `Portfolio exposure cap reached (${this.config.maxPortfolioExposurePct}%)`,
-          warnings
+    if (portfolio.totalValueUsd >= JUPITER_MIN_ORDER_USD) {
+      const maxPortfolioExposureUsd =
+        (this.config.maxPortfolioExposurePct / 100) * portfolio.totalValueUsd;
+
+      if (totalOpenExposure + requestedSizeUsd > maxPortfolioExposureUsd) {
+        const allowed = Math.max(0, maxPortfolioExposureUsd - totalOpenExposure);
+        if (allowed < JUPITER_MIN_ORDER_USD) {
+          return this.reject(
+            `Portfolio exposure cap reached (${this.config.maxPortfolioExposurePct}%)`,
+            warnings
+          );
+        }
+        warnings.push(
+          `Position reduced to $${allowed.toFixed(0)} due to portfolio exposure cap`
         );
+        requestedSizeUsd = allowed;
       }
-      warnings.push(
-        `Position reduced to $${allowed.toFixed(0)} due to portfolio exposure cap`
-      );
-      requestedSizeUsd = allowed;
     }
 
     // ── 14. Available balance ─────────────────────────────────────────

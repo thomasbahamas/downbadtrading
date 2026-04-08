@@ -9,6 +9,9 @@ interface HeartbeatData {
   paperTrade: boolean;
   uptime: number;
   activePositions: number;
+  portfolioValueUsd: number;
+  usdcBalance: number;
+  solBalance: number;
   timestamp: string;
   lastError: string | null;
 }
