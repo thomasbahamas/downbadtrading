@@ -57,6 +57,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               >
                 Trades
               </a>
+              <a
+                href="/research"
+                className="px-3 py-1.5 text-sm text-gray-400 hover:text-white hover:bg-surface-3 rounded-lg transition-colors"
+              >
+                Research
+              </a>
             </nav>
           </div>
         </header>

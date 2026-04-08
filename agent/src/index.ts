@@ -59,6 +59,18 @@ async function runLoop(): Promise<void> {
   const graph = await createAgentGraph(config);
   let agentState = createInitialState(config.profitWalletAddress);
 
+  // Load any existing open positions from DB at startup
+  try {
+    const db = new (await import('./db/trades')).TradeRepository(config);
+    const openPositions = await db.getOpenPositions();
+    agentState.activePositions = openPositions;
+    if (openPositions.length > 0) {
+      logger.info(`Loaded ${openPositions.length} open positions from DB at startup`);
+    }
+  } catch (err) {
+    logger.debug(`Failed to load positions at startup: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   logger.info(
     `Agent starting. paper_trade=${config.paperTrade} ` +
       `interval=${config.loopIntervalSeconds}s ` +
