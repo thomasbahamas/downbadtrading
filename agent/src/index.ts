@@ -14,6 +14,7 @@ import { createLogger } from './utils/logger';
 import { createAgentGraph } from './loop/graph';
 import { TelegramClient } from './notifications/telegram';
 import { getSupabaseClient } from './db/client';
+import { logActivity } from './db/activity';
 import { createInitialState } from './loop/graph';
 import http from 'http';
 
@@ -113,6 +114,10 @@ async function runLoop(): Promise<void> {
         logger.debug(`Heartbeat write failed: ${hbErr instanceof Error ? hbErr.message : String(hbErr)}`);
       }
 
+      // Write loop summary for the dashboard journal
+      const loopSummary = buildLoopSummary(agentState, globalLoopCount);
+      await logActivity(config, 'loop_summary', loopSummary.title, loopSummary.details, loopSummary.token, loopSummary.metadata);
+
       if (agentState.error) {
         logger.error(`Loop #${globalLoopCount} completed with error: ${agentState.error}`);
       }
@@ -181,6 +186,55 @@ async function main(): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildLoopSummary(state: import('./types').AgentState, loopNum: number): {
+  title: string;
+  details: string;
+  token: string | undefined;
+  metadata: Record<string, unknown>;
+} {
+  const tokensScanned = state.marketSnapshot?.tokens.length ?? 0;
+  const hadThesis = !!state.thesis;
+  const wasApproved = !!state.riskApproval?.approved;
+  const wasExecuted = !!state.executionResult?.success;
+  const token = state.thesis?.token.symbol;
+
+  let title: string;
+  if (wasExecuted) {
+    title = `Loop #${loopNum}: Scanned ${tokensScanned} tokens → Generated thesis on ${token} → Approved → Executed`;
+  } else if (hadThesis && !wasApproved) {
+    title = `Loop #${loopNum}: Scanned ${tokensScanned} tokens → Generated thesis on ${token} → Rejected by risk engine`;
+  } else if (hadThesis && wasApproved) {
+    title = `Loop #${loopNum}: Scanned ${tokensScanned} tokens → Generated thesis on ${token} → Approved (execution pending)`;
+  } else {
+    title = `Loop #${loopNum}: Scanned ${tokensScanned} tokens → No trade opportunity identified`;
+  }
+
+  const details = [
+    `${tokensScanned} tokens scanned`,
+    hadThesis ? `Thesis: ${token}` : 'No thesis generated',
+    wasApproved ? 'Risk: approved' : hadThesis ? `Risk: rejected — ${state.riskApproval?.reason ?? 'unknown'}` : '',
+    wasExecuted ? 'Execution: success' : '',
+    `${state.activePositions?.length ?? 0} open positions`,
+  ].filter(Boolean).join(' | ');
+
+  return {
+    title,
+    details,
+    token,
+    metadata: {
+      loopNumber: loopNum,
+      tokensScanned,
+      hadThesis,
+      thesisToken: token ?? null,
+      thesisConfidence: state.thesis?.confidenceScore ?? null,
+      wasApproved,
+      rejectionReason: (!wasApproved && hadThesis) ? (state.riskApproval?.reason ?? null) : null,
+      wasExecuted,
+      openPositions: state.activePositions?.length ?? 0,
+    },
+  };
 }
 
 main().catch((err) => {

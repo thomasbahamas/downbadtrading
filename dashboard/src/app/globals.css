@@ -33,4 +33,16 @@
   .badge-expired {
     @apply inline-flex items-center px-2 py-0.5 text-xs font-medium rounded-full bg-gray-500/15 text-gray-400;
   }
+
+  /* Scrollbar */
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 4px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: #2A2A36;
+    border-radius: 2px;
+  }
 }

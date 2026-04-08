@@ -86,7 +86,16 @@ export async function decideNode(
       logger.info(`DECIDE: rejected — ${approval.reason}`);
       await logActivity(config, 'rejected',
         `Rejected: ${state.thesis.token.symbol} — ${approval.reason}`,
-        undefined, state.thesis.token.symbol
+        state.thesis.reasoning,
+        state.thesis.token.symbol,
+        {
+          confidence: state.thesis.confidenceScore,
+          rr: state.thesis.riskRewardRatio,
+          entryPrice: state.thesis.entryPriceUsd,
+          tp: state.thesis.takeProfitUsd,
+          sl: state.thesis.stopLossUsd,
+          reason: approval.reason,
+        }
       );
     }
 

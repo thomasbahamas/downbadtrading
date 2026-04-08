@@ -133,7 +133,9 @@ export async function observeNode(
 
     await logActivity(config, 'scan',
       `Scanned ${tokenDataWithPyth.length} Solana tokens across 5 exchanges`,
-      `${resolvedEvents.length} on-chain events, ${resolvedListings.length} new listings`
+      `${resolvedEvents.length} on-chain events, ${resolvedListings.length} new listings`,
+      undefined,
+      { tokensScanned: tokenDataWithPyth.length, events: resolvedEvents.length, newListings: resolvedListings.length }
     );
 
     const snapshot: MarketSnapshot = {

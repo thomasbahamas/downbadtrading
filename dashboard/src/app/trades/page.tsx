@@ -1,8 +1,10 @@
 import { supabase } from '@/lib/supabase';
-import type { Trade } from '@/lib/types';
+import type { Trade, AgentActivity } from '@/lib/types';
 import TradeHistory from '@/components/TradeHistory';
+import RejectedTrades from '@/components/RejectedTrades';
 
-export const revalidate = 60;
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 const PAGE_SIZE = 50;
 
@@ -32,10 +34,23 @@ async function getTrades(page: number, status?: string) {
   };
 }
 
+async function getRejections() {
+  const { data } = await supabase
+    .from('agent_activity')
+    .select('*')
+    .in('type', ['rejected', 'no_trade'])
+    .order('created_at', { ascending: false })
+    .limit(20);
+  return (data as AgentActivity[]) ?? [];
+}
+
 export default async function TradesPage({ searchParams }: PageProps) {
   const page = parseInt(searchParams.page ?? '0', 10);
   const status = searchParams.status;
-  const { trades, total, error } = await getTrades(page, status);
+  const [{ trades, total, error }, rejections] = await Promise.all([
+    getTrades(page, status),
+    getRejections(),
+  ]);
   const totalPages = Math.ceil(total / PAGE_SIZE);
 
   return (
@@ -45,7 +60,6 @@ export default async function TradesPage({ searchParams }: PageProps) {
           <h1 className="text-xl font-semibold text-white">Trade History</h1>
           <p className="text-sm text-gray-500 mt-0.5">{total} total trades</p>
         </div>
-        {/* Status filter */}
         <div className="flex gap-2">
           {['all', 'open', 'tp_hit', 'sl_hit', 'expired'].map((s) => (
             <a
@@ -71,7 +85,11 @@ export default async function TradesPage({ searchParams }: PageProps) {
 
       <TradeHistory trades={trades} />
 
-      {/* Pagination */}
+      {/* Rejected trades — shows discipline */}
+      {rejections.length > 0 && (
+        <RejectedTrades rejections={rejections} />
+      )}
+
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-2 pt-4">
           {page > 0 && (
@@ -79,7 +97,7 @@ export default async function TradesPage({ searchParams }: PageProps) {
               href={`/trades?page=${page - 1}&status=${status ?? 'all'}`}
               className="px-4 py-2 text-sm bg-surface-2 hover:bg-surface-3 text-gray-300 rounded-lg transition-colors"
             >
-              ← Previous
+              &larr; Previous
             </a>
           )}
           <span className="text-sm text-gray-500">
@@ -90,7 +108,7 @@ export default async function TradesPage({ searchParams }: PageProps) {
               href={`/trades?page=${page + 1}&status=${status ?? 'all'}`}
               className="px-4 py-2 text-sm bg-surface-2 hover:bg-surface-3 text-gray-300 rounded-lg transition-colors"
             >
-              Next →
+              Next &rarr;
             </a>
           )}
         </div>

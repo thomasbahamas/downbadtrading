@@ -15,9 +15,11 @@ export type ActivityType =
   | 'scan'          // Market data collected
   | 'listing'       // New CEX listing detected
   | 'thesis'        // LLM generated a trade thesis
+  | 'no_trade'      // LLM returned no trade signal
   | 'rejected'      // Risk engine rejected
   | 'executed'      // Trade executed
   | 'position_close' // Position hit TP/SL
+  | 'loop_summary'  // End-of-loop summary with funnel stats
   | 'error';        // Error occurred
 
 export async function logActivity(
