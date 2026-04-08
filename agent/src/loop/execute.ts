@@ -139,6 +139,9 @@ export async function executeNode(
       jupiterOrderId,
       status: 'open',
       openedAt: Date.now(),
+      reasoning: thesis.reasoning,
+      signals: thesis.signals,
+      confidenceScore: thesis.confidenceScore,
     };
 
     await db.insertPosition(position);
@@ -210,6 +213,9 @@ async function executePaperTrade(
     stopLossUsd: thesis.stopLossUsd,
     jupiterOrderId: fakeOrderId,
     status: 'open',
+    reasoning: thesis.reasoning,
+    signals: thesis.signals,
+    confidenceScore: thesis.confidenceScore,
     openedAt: Date.now(),
   };
 

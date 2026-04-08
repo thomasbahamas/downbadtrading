@@ -92,6 +92,16 @@ export interface MarketSnapshot {
   trendingTokens: string[];
   /** Recent on-chain events from Helius */
   recentEvents: MarketEvent[];
+  /** Newly detected CEX listings since last scan */
+  newListings: CEXListing[];
+}
+
+export interface CEXListing {
+  exchange: string;
+  symbol: string;
+  baseAsset: string;
+  quoteAsset: string;
+  detectedAt: number;
 }
 
 export interface GlobalMetrics {
@@ -225,6 +235,12 @@ export interface Position {
   profitRouteTxSignature?: string;
   /** Unix timestamp ms of last trailing-stop update */
   lastTrailingStopUpdate?: number;
+  /** LLM reasoning for the trade */
+  reasoning?: string;
+  /** Signal breakdown from LLM analysis */
+  signals?: { priceAction: string; volume: string; socialSentiment: string; onChainMetrics: string };
+  /** LLM confidence score (0-1) */
+  confidenceScore?: number;
 }
 
 // ============================================================

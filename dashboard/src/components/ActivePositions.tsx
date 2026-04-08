@@ -6,13 +6,6 @@ interface Props {
   positions: Trade[];
 }
 
-function pnlColor(n: number | null): string {
-  if (n === null) return 'text-gray-400';
-  if (n > 0) return 'text-profit';
-  if (n < 0) return 'text-loss';
-  return 'text-gray-400';
-}
-
 export default function ActivePositions({ positions }: Props) {
   if (positions.length === 0) {
     return (
@@ -37,7 +30,6 @@ export default function ActivePositions({ positions }: Props) {
           const minsOpen = Math.floor((timeSinceEntry / (1000 * 60)) % 60);
           const timeLabel = hoursOpen > 0 ? `${hoursOpen}h ${minsOpen}m` : `${minsOpen}m`;
 
-          // TP/SL range as % from entry
           const tpPct = ((pos.take_profit - pos.entry_price) / pos.entry_price) * 100;
           const slPct = ((pos.stop_loss - pos.entry_price) / pos.entry_price) * 100;
 
@@ -53,6 +45,11 @@ export default function ActivePositions({ positions }: Props) {
                     <span className="text-gray-500 text-xs ml-2">
                       {pos.direction === 'buy' ? 'LONG' : 'SHORT'}
                     </span>
+                    {pos.confidence_score > 0 && (
+                      <span className="text-xs text-gray-600 ml-2">
+                        {(pos.confidence_score * 100).toFixed(0)}% conf
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="text-right">
@@ -87,8 +84,28 @@ export default function ActivePositions({ positions }: Props) {
                 </div>
               </div>
 
+              {/* Trade reasoning */}
               {pos.reasoning && (
-                <p className="text-xs text-gray-600 mt-2 truncate">{pos.reasoning}</p>
+                <div className="mt-2 pt-2 border-t border-surface-border/30">
+                  <p className="text-xs text-gray-500">
+                    <span className="text-gray-400 font-medium">Why: </span>
+                    {pos.reasoning}
+                  </p>
+                </div>
+              )}
+
+              {/* Signal breakdown */}
+              {pos.signals && typeof pos.signals === 'object' && Object.keys(pos.signals).length > 0 && (
+                <div className="grid grid-cols-2 gap-1 mt-1.5">
+                  {Object.entries(pos.signals)
+                    .filter(([, v]) => v && v !== 'n/a' && v !== '')
+                    .map(([key, value]) => (
+                      <p key={key} className="text-xs text-gray-600">
+                        <span className="capitalize">{key.replace(/([A-Z])/g, ' $1').trim()}</span>: {value}
+                      </p>
+                    ))
+                  }
+                </div>
               )}
 
               {pos.entry_tx && (

@@ -14,6 +14,7 @@ import type { AgentState, AgentConfig, MarketSnapshot, TokenData, Portfolio } fr
 import { CoinGeckoClient } from '../data/coingecko';
 import { PythClient } from '../data/pyth';
 import { HeliusClient } from '../data/helius';
+import { scanCEXListings } from '../data/cex-listings';
 import { TradingWallet } from '../wallet/trading';
 import { createLogger } from '../utils/logger';
 
@@ -63,11 +64,12 @@ export async function observeNode(
 
   try {
     // ── Run data fetches in parallel ────────────────────────────────────
-    const [portfolio, cgTokens, globalMetrics, recentEvents] = await Promise.allSettled([
+    const [portfolio, cgTokens, globalMetrics, recentEvents, cexListings] = await Promise.allSettled([
       fetchPortfolio(wallet),
       coingecko.getSolanaTokenMarkets(30),
       coingecko.getGlobalMetrics(),
       helius.getRecentEvents(50),
+      scanCEXListings(),
     ]);
 
     let resolvedPortfolio =
@@ -97,6 +99,7 @@ export async function observeNode(
             totalMarketCapUsd: 0,
           };
     const resolvedEvents = recentEvents.status === 'fulfilled' ? recentEvents.value : [];
+    const resolvedListings = cexListings.status === 'fulfilled' ? cexListings.value : [];
 
     // ── Map CoinGecko tokens to TokenData with Solana mints ─────────────
     const tokenDataList: TokenData[] = resolvedCgTokens.map((t) => {
@@ -116,12 +119,17 @@ export async function observeNode(
       .slice(0, 10)
       .map((t) => t.mint);
 
+    if (resolvedListings.length > 0) {
+      logger.info(`OBSERVE: ${resolvedListings.length} new CEX listing(s) detected!`);
+    }
+
     const snapshot: MarketSnapshot = {
       timestamp: Date.now(),
       tokens: tokenDataWithPyth,
       globalMetrics: resolvedGlobals,
       trendingTokens,
       recentEvents: resolvedEvents,
+      newListings: resolvedListings,
     };
 
     const elapsed = Date.now() - startTime;

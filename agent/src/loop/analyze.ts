@@ -59,10 +59,11 @@ You MUST return valid JSON matching exactly one of these schemas:
 }
 
 ## Signal weighting (in order of priority)
-1. On-chain: whale movements, holder growth, large transfers vs. exchange deposits
-2. Volume: volume spikes relative to 24h average, buy/sell volume ratio
-3. Price action: trend, support/resistance, momentum
-4. Sentiment: social signals (low weight — easily manipulated)
+1. **NEW CEX LISTINGS** (highest priority): When a token gets newly listed on Binance, Coinbase, Backpack, or Gemini, this is often your strongest signal. New listings frequently see 20-100%+ pumps. Set confidence high (0.8+), TP aggressive (15-30%), SL tighter (5-8%).
+2. On-chain: whale movements, holder growth, large transfers vs. exchange deposits
+3. Volume: volume spikes relative to 24h average, buy/sell volume ratio
+4. Price action: trend, support/resistance, momentum
+5. Sentiment: social signals (low weight — easily manipulated)
 
 Do not suggest meme coins under 24 hours old unless volume is exceptional (>$5M in 1h).
 
@@ -111,7 +112,7 @@ function buildUserPrompt(snapshot: MarketSnapshot, portfolio: Portfolio): string
     openPositions: portfolio.holdings.length,
   };
 
-  const prompt = {
+  const prompt: Record<string, unknown> = {
     timestamp: new Date(snapshot.timestamp).toISOString(),
     portfolio: portfolioSummary,
     globalMetrics: snapshot.globalMetrics,
@@ -120,14 +121,28 @@ function buildUserPrompt(snapshot: MarketSnapshot, portfolio: Portfolio): string
     recentEvents,
   };
 
-  return (
+  // Add CEX listings as high-priority signal
+  if (snapshot.newListings?.length > 0) {
+    prompt.NEW_CEX_LISTINGS = snapshot.newListings.map((l) => ({
+      exchange: l.exchange,
+      baseAsset: l.baseAsset,
+      quoteAsset: l.quoteAsset,
+      detectedMinutesAgo: Math.round((Date.now() - l.detectedAt) / 60000),
+    }));
+  }
+
+  let header =
     `Analyze the following Solana market data snapshot and identify the single best trade opportunity, ` +
     `or return a no-trade signal if conditions don't warrant a position.\n\n` +
     `Current portfolio: $${portfolio.totalValueUsd.toFixed(0)} total value, ` +
     `$${portfolioSummary.availableUsd.toFixed(0)} available, ` +
-    `${portfolioSummary.openPositions} open positions\n\n` +
-    `Market data:\n${JSON.stringify(prompt, null, 2)}`
-  );
+    `${portfolioSummary.openPositions} open positions\n\n`;
+
+  if (snapshot.newListings?.length > 0) {
+    header += `*** NEW CEX LISTING(S) DETECTED — CHECK IF ANY MATCH SOLANA TOKENS BELOW ***\n\n`;
+  }
+
+  return header + `Market data:\n${JSON.stringify(prompt, null, 2)}`;
 }
 
 // ─── LLM call ─────────────────────────────────────────────────────────────
