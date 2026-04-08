@@ -101,7 +101,8 @@ export class RiskEngine {
     }
 
     // ── 7. Risk/reward ratio ──────────────────────────────────────────
-    if (thesis.riskRewardRatio < MIN_RISK_REWARD_RATIO) {
+    // Use small epsilon to handle floating-point edge cases (e.g. 1.4999... vs 1.5)
+    if (thesis.riskRewardRatio < MIN_RISK_REWARD_RATIO - 0.005) {
       return this.reject(
         `Risk/reward ratio ${thesis.riskRewardRatio.toFixed(2)} < ${MIN_RISK_REWARD_RATIO} minimum`,
         warnings
