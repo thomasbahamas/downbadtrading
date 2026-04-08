@@ -13,7 +13,7 @@ import { config } from './config';
 import { createLogger } from './utils/logger';
 import { createAgentGraph } from './loop/graph';
 import { TelegramClient } from './notifications/telegram';
-import { SupabaseClient as DBClient } from './db/client';
+import { getSupabaseClient } from './db/client';
 import { createInitialState } from './loop/graph';
 import http from 'http';
 
@@ -92,6 +92,26 @@ async function runLoop(): Promise<void> {
         error: null,
       });
       agentState = result as unknown as import('./types').AgentState;
+
+      // Write heartbeat to Supabase so dashboard can read agent status
+      try {
+        const supabase = getSupabaseClient(config);
+        await supabase.from('circuit_breaker_state').upsert({
+          key: 'agent_heartbeat',
+          value: {
+            status: 'running',
+            loopCount: globalLoopCount,
+            paperTrade: config.paperTrade,
+            uptime: Math.floor(process.uptime()),
+            activePositions: agentState.activePositions?.length ?? 0,
+            timestamp: new Date().toISOString(),
+            lastError: agentState.error ?? null,
+          },
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'key' });
+      } catch (hbErr) {
+        logger.debug(`Heartbeat write failed: ${hbErr instanceof Error ? hbErr.message : String(hbErr)}`);
+      }
 
       if (agentState.error) {
         logger.error(`Loop #${globalLoopCount} completed with error: ${agentState.error}`);

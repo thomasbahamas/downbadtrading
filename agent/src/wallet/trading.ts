@@ -42,6 +42,24 @@ export class TradingWallet {
   }
 
   /**
+   * Returns the raw token balance (smallest units) for a given mint.
+   * Used by monitor.ts to sell the exact amount held.
+   */
+  async getTokenBalanceRaw(mint: string): Promise<string> {
+    const mintPubkey = new PublicKey(mint);
+    const ata = await getAssociatedTokenAddress(mintPubkey, this.keypair.publicKey);
+    const balance = await this.connection.getTokenAccountBalance(ata);
+    return balance.value.amount;
+  }
+
+  /**
+   * Signs a VersionedTransaction in-place with the wallet keypair.
+   */
+  signVersionedTransaction(tx: VersionedTransaction): void {
+    tx.sign([this.keypair]);
+  }
+
+  /**
    * Returns the current portfolio snapshot from on-chain data.
    * Holdings with unknown prices use $0 as placeholder.
    */

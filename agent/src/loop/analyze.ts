@@ -24,6 +24,7 @@ data and identify high-confidence short-term trading opportunities on the Solana
 
 ## Your constraints
 - Only suggest trades on Solana tokens with sufficient liquidity (>$50k USD)
+- Jupiter has a $10 minimum order size. Your positionSizePct MUST result in at least $10 given the available capital. For small portfolios, use a higher percentage (15-25%).
 - Focus on tokens showing clear technical or on-chain signals
 - You must provide specific, measurable price targets
 - Risk/reward ratio MUST be at least 1.5:1 — your TP should be at least 1.5x further from entry than your SL. E.g. entry=$1.00, SL=$0.92 (8% risk) → TP must be ≥$1.12 (12% reward). This is a hard requirement — trades below 1.5 R/R will be automatically rejected.
@@ -213,8 +214,9 @@ function parseLLMResponse(
   const direction = parsed.direction as 'buy' | 'sell';
   const riskRewardRatio = Math.abs(tp - entryPrice) / Math.abs(entryPrice - sl);
   const availableUsd = portfolio.usdcBalance + portfolio.solBalance * (snapshot.globalMetrics.solPriceUsd || 0);
+  const rawSize = (positionPct / 100) * availableUsd;
   const positionSizeUsd = Math.min(
-    (positionPct / 100) * availableUsd,
+    Math.max(rawSize, 10), // Jupiter $10 minimum floor
     config.maxAutoTradeUsd
   );
 

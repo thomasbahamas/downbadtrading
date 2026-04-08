@@ -1,33 +1,76 @@
 /**
  * ultra.ts — Jupiter Ultra API swap client.
  *
- * Flow:
- *  1. getQuote() — get best route
- *  2. getSwapTransaction() — get serialized VersionedTransaction
- *  3. Caller signs and sends (via TradingWallet)
+ * Flow (Jupiter Swap V2):
+ *  1. GET /order — get unsigned transaction + requestId
+ *  2. Sign transaction locally with wallet keypair
+ *  3. POST /execute — submit signed transaction + requestId
  *
- * Docs: https://dev.jup.ag/docs/ultra-api
- * Base URL: https://api.jup.ag/ultra/v1
+ * Docs: https://dev.jup.ag/docs/swap/order-and-execute
+ * Base URL: https://api.jup.ag/swap/v2
  */
 
 import axios from 'axios';
-import type {
-  AgentConfig,
-  UltraQuoteRequest,
-  UltraQuoteResponse,
-  UltraSwapRequest,
-  UltraSwapResponse,
-} from '../types';
+import { VersionedTransaction } from '@solana/web3.js';
+import type { AgentConfig } from '../types';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('jupiter/ultra');
+
+// ─── Types matching Jupiter Swap V2 API ──────────────────────────────────
+
+export interface OrderRequest {
+  inputMint: string;
+  outputMint: string;
+  amount: string;
+  taker: string;
+  slippageBps?: number;
+}
+
+export interface OrderResponse {
+  requestId: string;
+  inputMint: string;
+  outputMint: string;
+  inAmount: string;
+  outAmount: string;
+  otherAmountThreshold: string;
+  swapMode: string;
+  slippageBps: number;
+  priceImpact: number;
+  transaction: string | null; // base64 unsigned transaction (null if taker omitted)
+  lastValidBlockHeight: string;
+  prioritizationFeeLamports: number;
+  router: string;
+  error?: string;
+  errorCode?: number;
+}
+
+export interface ExecuteRequest {
+  signedTransaction: string; // base64 signed transaction
+  requestId: string;
+}
+
+export interface ExecuteResponse {
+  status: 'Success' | 'Failed';
+  signature: string;
+  code: number;
+  inputAmountResult?: string;
+  outputAmountResult?: string;
+  error?: string;
+}
+
+// ─── Client ──────────────────────────────────────────────────────────────
 
 export class JupiterUltraClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
 
   constructor(config: AgentConfig) {
-    this.baseUrl = config.jupiterUltraBaseUrl;
+    // Normalize: support both old /ultra/v1 and new /swap/v2 URLs
+    const configUrl = config.jupiterUltraBaseUrl;
+    this.baseUrl = configUrl.includes('/ultra/')
+      ? configUrl.replace('/ultra/v1', '/swap/v2')
+      : configUrl;
     this.apiKey = config.jupiterApiKey;
   }
 
@@ -39,75 +82,81 @@ export class JupiterUltraClient {
   }
 
   /**
-   * Get the best swap route and price quote.
-   *
-   * @param req.amount - Input amount in smallest unit (lamports / token decimals)
+   * Step 1: Get order (unsigned transaction + requestId).
+   * taker is required to get a transaction back.
    */
-  async getQuote(req: UltraQuoteRequest): Promise<UltraQuoteResponse> {
+  async getOrder(req: OrderRequest): Promise<OrderResponse> {
     const params: Record<string, string | number> = {
       inputMint: req.inputMint,
       outputMint: req.outputMint,
       amount: req.amount,
+      taker: req.taker,
     };
     if (req.slippageBps !== undefined) params.slippageBps = req.slippageBps;
-    if (req.taker) params.taker = req.taker;
 
-    logger.debug(
-      `getQuote: ${req.inputMint.slice(0, 8)} → ${req.outputMint.slice(0, 8)} ` +
-        `amount=${req.amount}`
+    logger.info(
+      `getOrder: ${req.inputMint.slice(0, 8)}… → ${req.outputMint.slice(0, 8)}… ` +
+        `amount=${req.amount} taker=${req.taker.slice(0, 8)}…`
     );
 
-    const response = await axios.get<UltraQuoteResponse>(`${this.baseUrl}/order`, {
+    const response = await axios.get<OrderResponse>(`${this.baseUrl}/order`, {
       params,
       headers: this.headers,
     });
 
-    const quote = response.data;
-    logger.debug(
-      `Quote: in=${quote.inAmount} out=${quote.outAmount} ` +
-        `priceImpact=${quote.priceImpactPct}% slippage=${quote.slippageBps}bps`
+    const order = response.data;
+
+    if (!order.transaction) {
+      throw new Error(
+        `Jupiter order returned no transaction: ${order.error || order.errorCode || 'unknown'}`
+      );
+    }
+
+    logger.info(
+      `Order: in=${order.inAmount} out=${order.outAmount} ` +
+        `slippage=${order.slippageBps}bps router=${order.router} requestId=${order.requestId}`
     );
 
-    return quote;
+    return order;
   }
 
   /**
-   * Get a serialized, ready-to-sign swap transaction.
+   * Step 2: Sign the unsigned transaction from getOrder().
+   * Returns base64-encoded signed transaction.
    */
-  async getSwapTransaction(req: UltraSwapRequest): Promise<UltraSwapResponse> {
-    const response = await axios.post<UltraSwapResponse>(
+  signTransaction(unsignedTxBase64: string, signer: { sign: (tx: VersionedTransaction) => void }): string {
+    const txBytes = Buffer.from(unsignedTxBase64, 'base64');
+    const tx = VersionedTransaction.deserialize(txBytes);
+    signer.sign(tx);
+    return Buffer.from(tx.serialize()).toString('base64');
+  }
+
+  /**
+   * Step 3: Submit signed transaction to Jupiter for broadcasting.
+   */
+  async execute(req: ExecuteRequest): Promise<ExecuteResponse> {
+    logger.info(`execute: submitting requestId=${req.requestId}`);
+
+    const response = await axios.post<ExecuteResponse>(
       `${this.baseUrl}/execute`,
       {
-        quoteResponse: req.quoteResponse,
-        userPublicKey: req.userPublicKey,
+        signedTransaction: req.signedTransaction,
+        requestId: req.requestId,
       },
       { headers: this.headers }
     );
-    return response.data;
-  }
 
-  /**
-   * Helper: get quote and swap transaction in one call.
-   * Caller must sign the returned transaction.
-   */
-  async quoteAndBuild(
-    inputMint: string,
-    outputMint: string,
-    amount: string,
-    userPublicKey: string,
-    slippageBps?: number
-  ): Promise<{ quote: UltraQuoteResponse; swapTx: UltraSwapResponse }> {
-    const quote = await this.getQuote({
-      inputMint,
-      outputMint,
-      amount,
-      taker: userPublicKey,
-      slippageBps,
-    });
-    const swapTx = await this.getSwapTransaction({
-      quoteResponse: quote,
-      userPublicKey,
-    });
-    return { quote, swapTx };
+    const result = response.data;
+
+    if (result.status === 'Success') {
+      logger.info(
+        `Swap success: sig=${result.signature} ` +
+          `in=${result.inputAmountResult} out=${result.outputAmountResult}`
+      );
+    } else {
+      logger.error(`Swap failed: code=${result.code} error=${result.error}`);
+    }
+
+    return result;
   }
 }

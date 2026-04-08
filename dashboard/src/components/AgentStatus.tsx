@@ -1,47 +1,52 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import type { AgentHealth } from '@/lib/types';
+import { supabase } from '@/lib/supabase';
 
-const AGENT_URL = process.env.NEXT_PUBLIC_AGENT_URL ?? 'http://localhost:3001';
-
-// Map loop state names to display labels
-const STATE_LABELS: Record<string, string> = {
-  observe: 'OBSERVE',
-  analyze: 'ANALYZE',
-  decide: 'DECIDE',
-  execute: 'EXECUTE',
-  report: 'REPORT',
-  monitor: 'MONITOR',
-};
+interface HeartbeatData {
+  status: string;
+  loopCount: number;
+  paperTrade: boolean;
+  uptime: number;
+  activePositions: number;
+  timestamp: string;
+  lastError: string | null;
+}
 
 type StatusIndicator = 'online' | 'offline' | 'loading';
 
 export default function AgentStatus() {
-  const [health, setHealth] = useState<AgentHealth | null>(null);
+  const [heartbeat, setHeartbeat] = useState<HeartbeatData | null>(null);
   const [status, setStatus] = useState<StatusIndicator>('loading');
 
   useEffect(() => {
-    const fetchHealth = async () => {
+    const fetchHeartbeat = async () => {
       try {
-        const res = await fetch(`${AGENT_URL}/health`, {
-          cache: 'no-store',
-          signal: AbortSignal.timeout(5000),
-        });
-        if (res.ok) {
-          const data = await res.json() as AgentHealth;
-          setHealth(data);
-          setStatus('online');
-        } else {
+        const { data, error } = await supabase
+          .from('circuit_breaker_state')
+          .select('value, updated_at')
+          .eq('key', 'agent_heartbeat')
+          .single();
+
+        if (error || !data) {
           setStatus('offline');
+          return;
         }
+
+        const hb = data.value as HeartbeatData;
+        const lastUpdate = new Date(data.updated_at).getTime();
+        const ageMs = Date.now() - lastUpdate;
+
+        // Consider online if updated within last 5 minutes
+        setStatus(ageMs < 5 * 60 * 1000 ? 'online' : 'offline');
+        setHeartbeat(hb);
       } catch {
         setStatus('offline');
       }
     };
 
-    void fetchHealth();
-    const interval = setInterval(fetchHealth, 15_000);
+    void fetchHeartbeat();
+    const interval = setInterval(fetchHeartbeat, 15_000);
     return () => clearInterval(interval);
   }, []);
 
@@ -62,29 +67,35 @@ export default function AgentStatus() {
         </div>
       </div>
 
-      {health ? (
+      {heartbeat ? (
         <div className="space-y-3">
           <div className="flex justify-between text-xs">
             <span className="text-gray-500">Mode</span>
-            <span className={health.paperTrade ? 'text-warning' : 'text-profit'}>
-              {health.paperTrade ? 'Paper Trade' : 'Live'}
+            <span className={heartbeat.paperTrade ? 'text-warning' : 'text-profit'}>
+              {heartbeat.paperTrade ? 'Paper Trade' : 'Live'}
             </span>
           </div>
           <div className="flex justify-between text-xs">
             <span className="text-gray-500">Loop Count</span>
-            <span className="text-white mono">{health.loopCount.toLocaleString()}</span>
+            <span className="text-white mono">{heartbeat.loopCount.toLocaleString()}</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500">Positions</span>
+            <span className="text-white mono">{heartbeat.activePositions}</span>
           </div>
           <div className="flex justify-between text-xs">
             <span className="text-gray-500">Uptime</span>
-            <span className="text-gray-300 mono">{formatUptime(health.uptime)}</span>
+            <span className="text-gray-300 mono">{formatUptime(heartbeat.uptime)}</span>
           </div>
           <div className="flex justify-between text-xs">
             <span className="text-gray-500">Last Ping</span>
             <span className="text-gray-400">
-              {new Date(health.timestamp).toLocaleTimeString()}
+              {new Date(heartbeat.timestamp).toLocaleTimeString()}
             </span>
           </div>
         </div>
+      ) : status === 'offline' ? (
+        <p className="text-sm text-gray-500 text-center py-4">Agent not running</p>
       ) : (
         <div className="space-y-3">
           {[...Array(4)].map((_, i) => (

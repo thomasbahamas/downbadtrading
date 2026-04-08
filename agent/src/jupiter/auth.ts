@@ -2,10 +2,10 @@
  * auth.ts — Jupiter Trigger V2 challenge-response JWT authentication.
  *
  * Flow:
- *  1. GET /auth/challenge?walletPubkey=<pubkey>
- *  2. Sign challenge with wallet private key (nacl)
- *  3. POST /auth/verify { walletPubkey, signature, challenge }
- *  4. Cache JWT; refresh when expired (check exp claim)
+ *  1. POST /auth/challenge { walletPubkey, type: "message" }
+ *  2. Sign challenge message with wallet private key (nacl)
+ *  3. POST /auth/verify { type: "message", walletPubkey, signature }
+ *  4. Cache JWT; refresh when expired
  */
 
 import axios from 'axios';
@@ -19,7 +19,6 @@ const logger = createLogger('jupiter/auth');
 
 interface ChallengeResponse {
   challenge: string;
-  expiresIn: number;
 }
 
 interface VerifyResponse {
@@ -67,12 +66,20 @@ export class JupiterAuthClient {
     };
   }
 
+  getPublicKey(): string {
+    return this.keypair.publicKey.toBase58();
+  }
+
+  getKeypair(): Keypair {
+    return this.keypair;
+  }
+
   // ─── Private ─────────────────────────────────────────────────────────
 
   private async refreshToken(): Promise<string> {
     const challenge = await this.fetchChallenge();
     const signature = this.signChallenge(challenge);
-    const verified = await this.verify(challenge, signature);
+    const verified = await this.verify(signature);
 
     this.cachedToken = {
       token: verified.token,
@@ -85,12 +92,10 @@ export class JupiterAuthClient {
 
   private async fetchChallenge(): Promise<string> {
     const pubkey = this.keypair.publicKey.toBase58();
-    const response = await axios.get<ChallengeResponse>(
+    const response = await axios.post<ChallengeResponse>(
       `${this.baseUrl}/auth/challenge`,
-      {
-        params: { walletPubkey: pubkey },
-        headers: { 'x-api-key': this.apiKey },
-      }
+      { walletPubkey: pubkey, type: 'message' },
+      { headers: { 'x-api-key': this.apiKey, 'Content-Type': 'application/json' } }
     );
     return response.data.challenge;
   }
@@ -101,18 +106,17 @@ export class JupiterAuthClient {
     return bs58.encode(signature);
   }
 
-  private async verify(challenge: string, signature: string): Promise<VerifyResponse> {
+  private async verify(signature: string): Promise<VerifyResponse> {
     const pubkey = this.keypair.publicKey.toBase58();
     const response = await axios.post<VerifyResponse>(
       `${this.baseUrl}/auth/verify`,
-      { walletPubkey: pubkey, signature, challenge },
+      { type: 'message', walletPubkey: pubkey, signature },
       { headers: { 'x-api-key': this.apiKey, 'Content-Type': 'application/json' } }
     );
     return response.data;
   }
 
   private isTokenValid(cached: CachedToken): boolean {
-    // Refresh 60 seconds before expiry to avoid race conditions
     const nowSec = Math.floor(Date.now() / 1000);
     return cached.expiresAt - nowSec > 60;
   }

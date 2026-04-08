@@ -56,10 +56,9 @@ export async function executeNode(
   const db = new TradeRepository(config);
 
   try {
-    // ── Phase 1: Swap ────────────────────────────────────────────────
+    // ── Phase 1: Swap via Jupiter Ultra (order → sign → execute) ────
     // Determine input: use USDC if available, else SOL
     const inputMint = state.portfolio.usdcBalance >= positionSizeUsd ? USDC_MINT : WSOL_MINT;
-    // Convert USD to token amount (in lamports / smallest unit)
     const inputDecimals = inputMint === USDC_MINT ? 6 : 9;
     const solPrice = state.marketSnapshot?.globalMetrics.solPriceUsd ?? 1;
     const inputAmountHuman =
@@ -68,47 +67,62 @@ export async function executeNode(
         : positionSizeUsd / solPrice;
     const inputAmountRaw = Math.floor(inputAmountHuman * 10 ** inputDecimals).toString();
 
-    const quote = await ultra.getQuote({
+    // Step 1: Get order (unsigned transaction + requestId)
+    const order = await ultra.getOrder({
       inputMint,
       outputMint: thesis.token.mint,
       amount: inputAmountRaw,
       taker: wallet.getPublicKey(),
     });
 
-    const swapTx = await ultra.getSwapTransaction({
-      quoteResponse: quote,
-      userPublicKey: wallet.getPublicKey(),
+    // Step 2: Sign the transaction locally
+    const signedTx = ultra.signTransaction(order.transaction!, {
+      sign: (tx) => wallet.signVersionedTransaction(tx),
     });
 
-    const { signature: swapSignature, slot } = await wallet.signAndSendTransaction(
-      swapTx.swapTransaction,
-      swapTx.lastValidBlockHeight
-    );
+    // Step 3: Submit to Jupiter for broadcasting + confirmation
+    const execResult = await ultra.execute({
+      signedTransaction: signedTx,
+      requestId: order.requestId,
+    });
 
-    logger.info(`EXECUTE: swap confirmed — sig=${swapSignature} slot=${slot}`);
+    if (execResult.status !== 'Success') {
+      throw new Error(`Jupiter swap failed: code=${execResult.code} ${execResult.error}`);
+    }
 
-    // Calculate actual amount of output token received
-    const outputAmountRaw = quote.outAmount;
-    const actualEntryPrice = positionSizeUsd / (Number(outputAmountRaw) / 10 ** 9); // approximate
+    const swapSignature = execResult.signature;
+    logger.info(`EXECUTE: swap confirmed — sig=${swapSignature}`);
 
-    // ── Phase 2: OCO order ────────────────────────────────────────────
-    const expiresAt = Date.now() + config.risk.orderExpiryDays * 24 * 3600 * 1000;
+    // Use thesis market price as entry price (accurate at analysis time)
+    // Avoids decimal mismatch: tokens have varying decimals (SOL=9, USDC=6, RENDER=8, etc.)
+    const outputAmountRaw = execResult.outputAmountResult || order.outAmount;
+    const actualEntryPrice = thesis.entryPriceUsd;
 
-    const ocoParams: TriggerOCOOrderParams = {
-      orderType: 'oco',
-      inputMint: thesis.token.mint,        // we're selling the token we just bought
-      inputAmount: outputAmountRaw,
-      outputMint: USDC_MINT,               // receive USDC on exit
-      triggerMint: thesis.token.mint,
-      tpPriceUsd: thesis.takeProfitUsd,
-      slPriceUsd: thesis.stopLossUsd,
-      tpSlippageBps: undefined,            // RTSE auto slippage
-      slSlippageBps: 2000,                 // 20% for execution certainty
-      expiresAt,
-    };
+    // ── Phase 2: OCO order (TP/SL) ─────────────────────────────────
+    let jupiterOrderId = 'NONE';
+    try {
+      const expiresAt = Date.now() + config.risk.orderExpiryDays * 24 * 3600 * 1000;
 
-    const ocoOrder = await trigger.createOrder(ocoParams);
-    logger.info(`EXECUTE: OCO order created — id=${ocoOrder.id}`);
+      const ocoParams: TriggerOCOOrderParams = {
+        orderType: 'oco',
+        inputMint: thesis.token.mint,
+        inputAmount: outputAmountRaw,
+        outputMint: USDC_MINT,
+        triggerMint: thesis.token.mint,
+        tpPriceUsd: thesis.takeProfitUsd,
+        slPriceUsd: thesis.stopLossUsd,
+        tpSlippageBps: undefined,
+        slSlippageBps: 2000,
+        expiresAt,
+      };
+
+      const ocoOrder = await trigger.createOrder(ocoParams);
+      jupiterOrderId = ocoOrder.id;
+      logger.info(`EXECUTE: OCO order created — id=${jupiterOrderId}`);
+    } catch (ocoErr) {
+      const msg = ocoErr instanceof Error ? ocoErr.message : String(ocoErr);
+      logger.warn(`EXECUTE: OCO order failed (position recorded without TP/SL): ${msg}`);
+    }
 
     // ── Record position ───────────────────────────────────────────────
     const position: Position = {
@@ -118,11 +132,11 @@ export async function executeNode(
       direction: 'long',
       entryPriceUsd: actualEntryPrice,
       entrySizeUsd: positionSizeUsd,
-      entryTokenAmount: Number(outputAmountRaw) / 10 ** 9,
+      entryTokenAmount: positionSizeUsd / actualEntryPrice,
       entryTxSignature: swapSignature,
       takeProfitUsd: thesis.takeProfitUsd,
       stopLossUsd: thesis.stopLossUsd,
-      jupiterOrderId: ocoOrder.id,
+      jupiterOrderId,
       status: 'open',
       openedAt: Date.now(),
     };
@@ -137,7 +151,7 @@ export async function executeNode(
     const result: ExecutionResult = {
       success: true,
       swapTxSignature: swapSignature,
-      jupiterOrderId: ocoOrder.id,
+      jupiterOrderId,
       entryPriceUsd: actualEntryPrice,
       amountOut: outputAmountRaw,
     };
@@ -146,8 +160,15 @@ export async function executeNode(
       executionResult: result,
       activePositions: [...state.activePositions, position],
     };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+  } catch (err: unknown) {
+    let message = err instanceof Error ? err.message : String(err);
+    // Log full axios error response for debugging
+    if (err && typeof err === 'object' && 'response' in err) {
+      const axiosErr = err as { response?: { status?: number; data?: unknown } };
+      if (axiosErr.response?.data) {
+        message += ` | Response: ${JSON.stringify(axiosErr.response.data)}`;
+      }
+    }
     logger.error(`EXECUTE failed: ${message}`);
     const result: ExecutionResult = {
       success: false,

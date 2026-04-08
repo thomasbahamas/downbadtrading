@@ -1,12 +1,12 @@
 'use client';
 
 interface Props {
-  endingBalanceUsd: number;
-  startingBalanceUsd: number;
+  deployedCapital: number;
   dailyPnl: number;
   dailyPnlPct: number;
   totalPnl: number;
   openPositions: number;
+  totalTrades: number;
 }
 
 function pnlColor(n: number): string {
@@ -30,41 +30,41 @@ function formatPct(n: number): string {
 }
 
 export default function PortfolioCard({
-  endingBalanceUsd,
-  startingBalanceUsd,
+  deployedCapital,
   dailyPnl,
   dailyPnlPct,
   totalPnl,
   openPositions,
+  totalTrades,
 }: Props) {
   return (
     <div className="card h-full">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-sm font-semibold text-white">Portfolio</h2>
-        <span className="text-xs text-gray-500">Today</span>
+        <span className="text-xs text-gray-500">Live</span>
       </div>
 
-      {/* Balance */}
+      {/* Deployed capital */}
       <div className="mb-4">
         <p className="text-3xl font-bold text-white mono">
-          {formatUsd(endingBalanceUsd)}
+          {formatUsd(deployedCapital)}
         </p>
-        <div className="flex items-center gap-2 mt-1">
-          <span className={`text-sm mono ${pnlColor(dailyPnl)}`}>
-            {dailyPnl >= 0 ? '+' : ''}{formatUsd(dailyPnl)}
-          </span>
-          <span className={`text-xs ${pnlColor(dailyPnlPct)}`}>
-            ({formatPct(dailyPnlPct)})
-          </span>
-        </div>
+        <p className="text-xs text-gray-500 mt-0.5">Capital deployed in open positions</p>
+        {dailyPnl !== 0 && (
+          <div className="flex items-center gap-2 mt-1">
+            <span className={`text-sm mono ${pnlColor(dailyPnl)}`}>
+              {dailyPnl >= 0 ? '+' : ''}{formatUsd(dailyPnl)}
+            </span>
+            <span className={`text-xs ${pnlColor(dailyPnlPct)}`}>
+              ({formatPct(dailyPnlPct)})
+            </span>
+            <span className="text-xs text-gray-600">today</span>
+          </div>
+        )}
       </div>
 
       {/* Stats row */}
       <div className="grid grid-cols-3 gap-3 pt-3 border-t border-surface-border">
-        <div>
-          <p className="text-xs text-gray-500 mb-0.5">Start of Day</p>
-          <p className="text-sm mono text-gray-300">{formatUsd(startingBalanceUsd)}</p>
-        </div>
         <div>
           <p className="text-xs text-gray-500 mb-0.5">Total P&L</p>
           <p className={`text-sm mono ${pnlColor(totalPnl)}`}>
@@ -74,6 +74,10 @@ export default function PortfolioCard({
         <div>
           <p className="text-xs text-gray-500 mb-0.5">Open Positions</p>
           <p className="text-sm mono text-white">{openPositions}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500 mb-0.5">Total Trades</p>
+          <p className="text-sm mono text-white">{totalTrades}</p>
         </div>
       </div>
     </div>
