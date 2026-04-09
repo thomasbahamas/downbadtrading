@@ -1,9 +1,15 @@
 /**
  * analyze.ts — ANALYZE node.
  *
- * Passes the market snapshot + portfolio context to the LLM.
- * The LLM returns either a TradeThesis (structured JSON) or a
- * no-trade signal.
+ * Multi-layer cost optimization:
+ *  1. Deterministic pre-filter — skip LLM entirely in dead markets
+ *  2. Material change detection — cache no-trade, skip if nothing moved
+ *  3. Haiku screening — cheap first pass on top tokens
+ *  4. Sonnet full analysis — only called when Haiku flags something
+ *
+ * On quiet days, layers 1-2 handle ~80% of loops at $0 LLM cost.
+ * Layer 3 catches another 15% for ~$0.001/call.
+ * Layer 4 (Sonnet) only fires when there's a real opportunity.
  *
  * Returns: { thesis } (null = no-trade)
  */
@@ -17,7 +23,152 @@ import { createLogger } from '../utils/logger';
 
 const logger = createLogger('analyze');
 
-// ─── Prompts ──────────────────────────────────────────────────────────────
+// ─── Market state cache (module-level, persists across loops) ─────────────
+
+interface MarketStateCache {
+  fearGreedIndex: number;
+  tokenPrices: Map<string, number>;
+  hadCexListings: boolean;
+  noTradeReason: string | null;
+  timestamp: number;
+}
+
+let lastMarketState: MarketStateCache | null = null;
+let consecutiveSkips = 0;
+const MAX_CONSECUTIVE_SKIPS = 5; // Force a full check every 5 skips (~15 min at 3-min loops)
+
+// ─── Deterministic pre-filter thresholds ──────────────────────────────────
+
+const EXTREME_FEAR_THRESHOLD = 20;
+const HOT_TOKEN_MOVE_PCT = 5;          // 5% 1h move = worth looking at
+const MATERIAL_PRICE_CHANGE_PCT = 0.03; // 3% price move = material change
+const MATERIAL_FG_SHIFT = 5;           // 5-point F&G shift = material change
+
+// ─── Layer 1: Deterministic pre-filter ────────────────────────────────────
+// No LLM call at all — pure code decision
+
+function shouldSkipAnalysis(snapshot: MarketSnapshot): { skip: boolean; reason: string } {
+  const fg = snapshot.globalMetrics.fearGreedIndex;
+  const hasHotToken = snapshot.tokens.some(
+    (t) => Math.abs(t.priceChange1h) > HOT_TOKEN_MOVE_PCT
+  );
+  const hasCexListing = (snapshot.newListings?.length ?? 0) > 0;
+
+  if (fg > 0 && fg < EXTREME_FEAR_THRESHOLD && !hasHotToken && !hasCexListing) {
+    return {
+      skip: true,
+      reason: `Extreme fear (F&G=${fg}), no ${HOT_TOKEN_MOVE_PCT}%+ movers, no CEX listings`,
+    };
+  }
+
+  return { skip: false, reason: '' };
+}
+
+// ─── Layer 2: Material change detection ───────────────────────────────────
+// Reuse cached no-trade if nothing material changed
+
+function hasMarketChanged(snapshot: MarketSnapshot, cached: MarketStateCache): boolean {
+  // F&G shifted enough
+  if (Math.abs(snapshot.globalMetrics.fearGreedIndex - cached.fearGreedIndex) >= MATERIAL_FG_SHIFT) {
+    return true;
+  }
+
+  // Any token moved 3%+
+  for (const token of snapshot.tokens.slice(0, 20)) {
+    const oldPrice = cached.tokenPrices.get(token.symbol);
+    if (oldPrice && oldPrice > 0) {
+      const change = Math.abs((token.priceUsd - oldPrice) / oldPrice);
+      if (change >= MATERIAL_PRICE_CHANGE_PCT) return true;
+    }
+  }
+
+  // New CEX listing appeared
+  if ((snapshot.newListings?.length ?? 0) > 0 && !cached.hadCexListings) return true;
+
+  return false;
+}
+
+function cacheMarketState(snapshot: MarketSnapshot, noTradeReason: string | null): void {
+  const tokenPrices = new Map<string, number>();
+  for (const t of snapshot.tokens.slice(0, 30)) {
+    tokenPrices.set(t.symbol, t.priceUsd);
+  }
+  lastMarketState = {
+    fearGreedIndex: snapshot.globalMetrics.fearGreedIndex,
+    tokenPrices,
+    hadCexListings: (snapshot.newListings?.length ?? 0) > 0,
+    noTradeReason,
+    timestamp: Date.now(),
+  };
+}
+
+// ─── Layer 3: Haiku screening prompt ──────────────────────────────────────
+
+function buildScreeningPrompt(snapshot: MarketSnapshot): string {
+  const tokens = [...snapshot.tokens]
+    .sort((a, b) => b.volume24h - a.volume24h)
+    .slice(0, 15)
+    .map((t) => `${t.symbol}: $${t.priceUsd.toPrecision(4)} (1h:${t.priceChange1h?.toFixed(1)}% 24h:${t.priceChange24h?.toFixed(1)}% vol:${formatUsd(t.volume24h)})`);
+
+  let prompt = `Solana token screener. F&G: ${snapshot.globalMetrics.fearGreedIndex}. SOL: $${snapshot.globalMetrics.solPriceUsd.toFixed(2)}.\n\n`;
+  prompt += tokens.join('\n');
+
+  if (snapshot.newListings?.length) {
+    prompt += `\n\nNEW CEX LISTINGS: ${snapshot.newListings.map((l) => `${l.baseAsset} on ${l.exchange}`).join(', ')}`;
+  }
+
+  prompt += `\n\nWhich tokens (if any) show a clear short-term setup? Return JSON: {"tokens":["SYM1"]} or {"tokens":[]}. Be very selective — only flag strong volume + momentum.`;
+
+  return prompt;
+}
+
+async function runHaikuScreening(
+  snapshot: MarketSnapshot,
+  config: AgentConfig
+): Promise<string[]> {
+  const prompt = buildScreeningPrompt(snapshot);
+
+  try {
+    let raw: string;
+
+    if (config.llmProvider === 'anthropic') {
+      const client = new Anthropic({ apiKey: config.anthropicApiKey });
+      const response = await client.messages.create({
+        model: config.anthropicScreeningModel,
+        max_tokens: 128,
+        messages: [{ role: 'user', content: prompt }],
+        system: 'You are a fast market screener. Return only JSON. Be very selective.',
+      });
+      const block = response.content[0];
+      raw = block.type === 'text' ? block.text : '{"tokens":[]}';
+    } else {
+      const client = new OpenAI({ apiKey: config.openaiApiKey });
+      const response = await client.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: 'You are a fast market screener. Return only JSON. Be very selective.' },
+          { role: 'user', content: prompt },
+        ],
+        max_tokens: 128,
+        response_format: { type: 'json_object' },
+      });
+      raw = response.choices[0].message.content || '{"tokens":[]}';
+    }
+
+    const cleaned = raw.replace(/^```[a-z]*\n?/gm, '').replace(/^```$/gm, '').trim();
+    const parsed = JSON.parse(cleaned);
+    const flagged = Array.isArray(parsed.tokens) ? parsed.tokens as string[] : [];
+
+    logger.info(`ANALYZE: Haiku screening flagged ${flagged.length} tokens: ${flagged.join(', ') || 'none'}`);
+    return flagged;
+  } catch (err) {
+    logger.warn(`ANALYZE: Haiku screening failed: ${err instanceof Error ? err.message : String(err)}`);
+    // On screening failure, fall through to full analysis
+    return ['FALLBACK'];
+  }
+}
+
+// ─── Layer 4: Full Sonnet analysis (existing logic, optimized) ────────────
 
 function buildSystemPrompt(): string {
   return `You are a senior portfolio manager at a quantitative trading firm specializing in Solana DeFi markets. You write with precision and authority. Your job is to analyze on-chain market data, identify high-confidence short-term trading opportunities, and produce institutional-grade trade recommendations.
@@ -91,11 +242,27 @@ Do not suggest meme coins under 24 hours old unless volume is exceptional (>$5M 
 Return ONLY the JSON object — no preamble, no explanation, no markdown code fences.`;
 }
 
-function buildUserPrompt(snapshot: MarketSnapshot, portfolio: Portfolio): string {
-  // Select top tokens by volume for context (avoid overwhelming the context window)
-  const topTokens = [...snapshot.tokens]
-    .sort((a, b) => b.volume24h - a.volume24h)
-    .slice(0, 20)
+function buildUserPrompt(
+  snapshot: MarketSnapshot,
+  portfolio: Portfolio,
+  focusTokens?: string[]
+): string {
+  let tokenList = [...snapshot.tokens]
+    .sort((a, b) => b.volume24h - a.volume24h);
+
+  // If Haiku flagged specific tokens, prioritize those but include a few extra for context
+  if (focusTokens && focusTokens.length > 0 && !focusTokens.includes('FALLBACK')) {
+    const flagged = tokenList.filter((t) =>
+      focusTokens.includes(t.symbol)
+    );
+    const others = tokenList.filter((t) =>
+      !focusTokens.includes(t.symbol)
+    ).slice(0, 5);
+    tokenList = [...flagged, ...others];
+  }
+
+  const topTokens = tokenList
+    .slice(0, 10)
     .map((t) => ({
       symbol: t.symbol,
       mint: t.mint,
@@ -114,7 +281,7 @@ function buildUserPrompt(snapshot: MarketSnapshot, portfolio: Portfolio): string
           : 'n/a',
     }));
 
-  const recentEvents = snapshot.recentEvents.slice(0, 10).map((e) => ({
+  const recentEvents = snapshot.recentEvents.slice(0, 5).map((e) => ({
     type: e.type,
     token: e.tokenSymbol || e.token.slice(0, 8),
     details: e.details,
@@ -131,12 +298,10 @@ function buildUserPrompt(snapshot: MarketSnapshot, portfolio: Portfolio): string
     timestamp: new Date(snapshot.timestamp).toISOString(),
     portfolio: portfolioSummary,
     globalMetrics: snapshot.globalMetrics,
-    trendingMints: snapshot.trendingTokens.slice(0, 10),
     tokens: topTokens,
     recentEvents,
   };
 
-  // Add CEX listings as high-priority signal
   if (snapshot.newListings?.length > 0) {
     prompt.NEW_CEX_LISTINGS = snapshot.newListings.map((l) => ({
       exchange: l.exchange,
@@ -147,11 +312,15 @@ function buildUserPrompt(snapshot: MarketSnapshot, portfolio: Portfolio): string
   }
 
   let header =
-    `Analyze the following Solana market data snapshot and identify the single best trade opportunity, ` +
+    `Analyze the following Solana market data and identify the single best trade opportunity, ` +
     `or return a no-trade signal if conditions don't warrant a position.\n\n` +
-    `Current portfolio: $${portfolio.totalValueUsd.toFixed(0)} total value, ` +
+    `Portfolio: $${portfolio.totalValueUsd.toFixed(0)} total, ` +
     `$${portfolioSummary.availableUsd.toFixed(0)} available, ` +
     `${portfolioSummary.openPositions} open positions\n\n`;
+
+  if (focusTokens && focusTokens.length > 0 && !focusTokens.includes('FALLBACK')) {
+    header += `*** SCREENER FLAGGED: ${focusTokens.join(', ')} — prioritize these ***\n\n`;
+  }
 
   if (snapshot.newListings?.length > 0) {
     header += `*** NEW CEX LISTING(S) DETECTED — CHECK IF ANY MATCH SOLANA TOKENS BELOW ***\n\n`;
@@ -165,12 +334,13 @@ function buildUserPrompt(snapshot: MarketSnapshot, portfolio: Portfolio): string
 async function callLLM(
   systemPrompt: string,
   userPrompt: string,
-  config: AgentConfig
+  config: AgentConfig,
+  model?: string
 ): Promise<string> {
   if (config.llmProvider === 'anthropic') {
     const client = new Anthropic({ apiKey: config.anthropicApiKey });
     const response = await client.messages.create({
-      model: config.anthropicModel,
+      model: model ?? config.anthropicModel,
       max_tokens: 1024,
       messages: [{ role: 'user', content: userPrompt }],
       system: systemPrompt,
@@ -203,7 +373,6 @@ function parseLLMResponse(
 ): TradeThesis | null {
   let parsed: Record<string, unknown>;
   try {
-    // Strip markdown code fences if the model included them
     const cleaned = raw.replace(/^```[a-z]*\n?/gm, '').replace(/^```$/gm, '').trim();
     parsed = JSON.parse(cleaned);
   } catch {
@@ -221,9 +390,7 @@ function parseLLMResponse(
     return null;
   }
 
-  // Find token in snapshot for validation
   const tokenIn = parsed.token as { symbol: string; mint: string; name: string };
-  const tokenData = snapshot.tokens.find((t) => t.mint === tokenIn.mint);
 
   const entryPrice = Number(parsed.entryPriceUsd);
   const tp = Number(parsed.takeProfitUsd);
@@ -231,7 +398,6 @@ function parseLLMResponse(
   const positionPct = Number(parsed.positionSizePct);
   const confidence = Number(parsed.confidenceScore);
 
-  // Sanity checks
   if (!entryPrice || !tp || !sl || tp <= sl) {
     logger.warn(`LLM: invalid price targets — entry=${entryPrice} tp=${tp} sl=${sl}`);
     return null;
@@ -246,7 +412,7 @@ function parseLLMResponse(
   const availableUsd = portfolio.usdcBalance + portfolio.solBalance * (snapshot.globalMetrics.solPriceUsd || 0);
   const rawSize = (positionPct / 100) * availableUsd;
   const positionSizeUsd = Math.min(
-    Math.max(rawSize, 10), // Jupiter $10 minimum floor
+    Math.max(rawSize, 10),
     config.maxAutoTradeUsd
   );
 
@@ -291,14 +457,74 @@ export async function analyzeNode(
     return { thesis: null };
   }
 
-  logger.info('ANALYZE: generating trade thesis via LLM…');
+  const snapshot = state.marketSnapshot;
+
+  // ── Layer 1: Deterministic pre-filter ─────────────────────────────
+  const preFilter = shouldSkipAnalysis(snapshot);
+  if (preFilter.skip && consecutiveSkips < MAX_CONSECUTIVE_SKIPS) {
+    consecutiveSkips++;
+    logger.info(`ANALYZE: skipped (deterministic) — ${preFilter.reason} [skip ${consecutiveSkips}/${MAX_CONSECUTIVE_SKIPS}]`);
+    await logActivity(config, 'no_trade',
+      `No trade: ${preFilter.reason}`,
+      `Skipped LLM — deterministic filter (${consecutiveSkips} consecutive skips)`,
+      undefined,
+      { tokensAnalyzed: snapshot.tokens.length, skipReason: 'deterministic_filter' }
+    );
+    cacheMarketState(snapshot, preFilter.reason);
+    return { thesis: null };
+  }
+
+  // ── Layer 2: Material change detection ────────────────────────────
+  if (
+    lastMarketState?.noTradeReason &&
+    !hasMarketChanged(snapshot, lastMarketState) &&
+    consecutiveSkips < MAX_CONSECUTIVE_SKIPS
+  ) {
+    consecutiveSkips++;
+    logger.info(
+      `ANALYZE: skipped (no material change) — reusing: "${lastMarketState.noTradeReason}" ` +
+        `[skip ${consecutiveSkips}/${MAX_CONSECUTIVE_SKIPS}]`
+    );
+    await logActivity(config, 'no_trade',
+      `No trade: ${lastMarketState.noTradeReason} (cached — no material change)`,
+      `Skipped LLM — market unchanged since last analysis`,
+      undefined,
+      { tokensAnalyzed: snapshot.tokens.length, skipReason: 'no_material_change' }
+    );
+    return { thesis: null };
+  }
+
+  // Reset skip counter — we're doing a real analysis
+  consecutiveSkips = 0;
+
+  logger.info('ANALYZE: market changed or forced check — running LLM pipeline…');
 
   try {
+    // ── Layer 3: Haiku screening ──────────────────────────────────────
+    const flaggedTokens = await runHaikuScreening(snapshot, config);
+
+    if (flaggedTokens.length === 0) {
+      // Haiku says nothing interesting — skip Sonnet entirely
+      const noTradeReason = 'Screening found no actionable setups';
+      logger.info(`ANALYZE: Haiku found nothing, skipping Sonnet`);
+      await logActivity(config, 'no_trade',
+        `No trade: ${noTradeReason}`,
+        `Haiku screened ${snapshot.tokens.length} tokens — none flagged`,
+        undefined,
+        { tokensAnalyzed: snapshot.tokens.length, skipReason: 'haiku_no_flags' }
+      );
+      cacheMarketState(snapshot, noTradeReason);
+      return { thesis: null };
+    }
+
+    // ── Layer 4: Sonnet full analysis ─────────────────────────────────
+    logger.info(`ANALYZE: Haiku flagged ${flaggedTokens.join(', ')} — calling Sonnet for full analysis`);
+
     const systemPrompt = buildSystemPrompt();
-    const userPrompt = buildUserPrompt(state.marketSnapshot, state.portfolio);
+    const userPrompt = buildUserPrompt(snapshot, state.portfolio, flaggedTokens);
 
     const rawResponse = await callLLM(systemPrompt, userPrompt, config);
-    const thesis = parseLLMResponse(rawResponse, state.marketSnapshot, config, state.portfolio);
+    const thesis = parseLLMResponse(rawResponse, snapshot, config, state.portfolio);
 
     if (thesis) {
       await logActivity(config, 'thesis',
@@ -306,8 +532,9 @@ export async function analyzeNode(
         thesis.reasoning, thesis.token.symbol,
         { confidence: thesis.confidenceScore, rr: thesis.riskRewardRatio, tp: thesis.takeProfitUsd, sl: thesis.stopLossUsd }
       );
+      // Clear no-trade cache since we have a thesis
+      cacheMarketState(snapshot, null);
     } else {
-      // Extract no-trade reason from raw LLM response
       let noTradeReason = 'No clear opportunity identified';
       try {
         const cleaned = rawResponse.replace(/^```[a-z]*\n?/gm, '').replace(/^```$/gm, '').trim();
@@ -316,10 +543,11 @@ export async function analyzeNode(
       } catch { /* use default */ }
       await logActivity(config, 'no_trade',
         `No trade: ${noTradeReason}`,
-        `Analyzed top ${state.marketSnapshot.tokens.length} tokens by volume`,
+        `Sonnet analyzed flagged tokens (${flaggedTokens.join(', ')}) — passed`,
         undefined,
-        { tokensAnalyzed: state.marketSnapshot.tokens.length }
+        { tokensAnalyzed: snapshot.tokens.length, flaggedTokens, skipReason: 'sonnet_no_trade' }
       );
+      cacheMarketState(snapshot, noTradeReason);
     }
 
     return { thesis };

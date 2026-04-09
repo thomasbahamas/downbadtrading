@@ -37,7 +37,8 @@ const envSchema = z.object({
   // LLM
   LLM_PROVIDER: z.enum(['anthropic', 'openai']).default('anthropic'),
   ANTHROPIC_API_KEY: z.string().default(''),
-  ANTHROPIC_MODEL: z.string().default('claude-opus-4-5'),
+  ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-5'),
+  ANTHROPIC_SCREENING_MODEL: z.string().default('claude-haiku-4-5-20251001'),
   OPENAI_API_KEY: z.string().default(''),
   OPENAI_MODEL: z.string().default('gpt-4o'),
 
@@ -57,7 +58,7 @@ const envSchema = z.object({
 
   // Agent behavior
   MAX_AUTO_TRADE_USD: z.coerce.number().positive().default(500),
-  LOOP_INTERVAL_SECONDS: z.coerce.number().int().positive().default(60),
+  LOOP_INTERVAL_SECONDS: z.coerce.number().int().positive().default(180),
 
   // Risk parameters
   MAX_PORTFOLIO_EXPOSURE_PCT: z.coerce.number().min(1).max(100).default(30),
@@ -144,6 +145,7 @@ function buildConfig(env: RawEnv): AgentConfig {
     llmProvider: env.LLM_PROVIDER,
     anthropicApiKey: env.ANTHROPIC_API_KEY,
     anthropicModel: env.ANTHROPIC_MODEL,
+    anthropicScreeningModel: env.ANTHROPIC_SCREENING_MODEL,
     openaiApiKey: env.OPENAI_API_KEY,
     openaiModel: env.OPENAI_MODEL,
     birdeyeApiKey: env.BIRDEYE_API_KEY,

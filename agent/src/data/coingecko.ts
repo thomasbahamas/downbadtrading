@@ -56,6 +56,21 @@ interface CoinGeckoMarketItem {
 // These get fetched separately and merged into the token list.
 const ALWAYS_INCLUDE_IDS = ['hyperliquid', 'zcash', 'wormhole-bridged-hype', 'omnibridge-bridged-zcash-solana'];
 
+// ─── Response cache (module-level, persists across CoinGeckoClient instances) ─
+const responseCache = new Map<string, { data: unknown; expiry: number }>();
+const CACHE_TTL_MS = 150_000; // 2.5 minutes — aligns with 3-min loop interval
+
+function getCached<T>(key: string): T | null {
+  const entry = responseCache.get(key);
+  if (entry && Date.now() < entry.expiry) return entry.data as T;
+  responseCache.delete(key);
+  return null;
+}
+
+function setCache(key: string, data: unknown): void {
+  responseCache.set(key, { data, expiry: Date.now() + CACHE_TTL_MS });
+}
+
 export class CoinGeckoClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -75,6 +90,11 @@ export class CoinGeckoClient {
    * Returns global market metrics including SOL price, BTC dominance, etc.
    */
   async getGlobalMetrics(): Promise<GlobalMetrics> {
+    const cached = getCached<GlobalMetrics>('global_metrics');
+    if (cached) {
+      logger.debug('getGlobalMetrics: returning cached data');
+      return cached;
+    }
     // Sequential calls to avoid CoinGecko rate limiting
     const globalResp = await Promise.resolve().then(() => this.getGlobal()).then(
       v => ({ status: 'fulfilled' as const, value: v }),
@@ -93,7 +113,7 @@ export class CoinGeckoClient {
     const prices = priceResp.status === 'fulfilled' ? priceResp.value : {};
     const fearGreed = fearGreedResp.status === 'fulfilled' ? fearGreedResp.value : 50;
 
-    return {
+    const result: GlobalMetrics = {
       solPriceUsd: prices['solana']?.usd ?? 0,
       solVolume24h: prices['solana']?.usd_24h_vol ?? 0,
       totalDexVolume24h: 0,
@@ -101,6 +121,8 @@ export class CoinGeckoClient {
       btcDominancePct: globalData?.data.market_cap_percentage['btc'] ?? 40,
       totalMarketCapUsd: globalData?.data.total_market_cap['usd'] ?? 0,
     };
+    setCache('global_metrics', result);
+    return result;
   }
 
   /**
@@ -153,6 +175,11 @@ export class CoinGeckoClient {
    * Returns TokenData[] compatible with the agent's token universe.
    */
   async getSolanaTokenMarkets(limit = 100): Promise<TokenData[]> {
+    const cached = getCached<TokenData[]>(`solana_markets_${limit}`);
+    if (cached) {
+      logger.debug(`getSolanaTokenMarkets: returning ${cached.length} cached tokens`);
+      return cached;
+    }
     try {
       // Fetch Solana ecosystem tokens by category — CoinGecko's category filter
       // gives us 100+ tokens sorted by volume, much broader than a hardcoded list
@@ -250,6 +277,7 @@ export class CoinGeckoClient {
       const filtered = allTokens.filter((t) => t.volume24h >= 10_000);
 
       logger.info(`getSolanaTokenMarkets: fetched ${allTokens.length} tokens, ${filtered.length} with >$10K volume`);
+      setCache(`solana_markets_${limit}`, filtered);
       return filtered;
     } catch (err) {
       logger.warn(`getSolanaTokenMarkets failed: ${err}`);

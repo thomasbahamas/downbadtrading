@@ -630,6 +630,7 @@ export interface AgentConfig {
   llmProvider: 'anthropic' | 'openai';
   anthropicApiKey: string;
   anthropicModel: string;
+  anthropicScreeningModel: string;
   openaiApiKey: string;
   openaiModel: string;
   birdeyeApiKey: string;
