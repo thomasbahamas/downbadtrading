@@ -96,6 +96,10 @@ export interface MarketSnapshot {
   recentEvents: MarketEvent[];
   /** Newly detected CEX listings since last scan */
   newListings: CEXListing[];
+  /** Social mindshare rankings from Surf */
+  socialRankings?: Array<{ symbol: string; name: string; rank: number; sentiment: string; sentimentScore: number }>;
+  /** Prediction market signals from Polymarket/Kalshi via Surf */
+  predictionSignals?: Array<{ title: string; probability: number; volume: number; category: string }>;
 }
 
 export interface CEXListing {

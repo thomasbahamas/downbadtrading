@@ -117,7 +117,12 @@ function buildScreeningPrompt(snapshot: MarketSnapshot): string {
     prompt += `\n\nNEW CEX LISTINGS: ${snapshot.newListings.map((l) => `${l.baseAsset} on ${l.exchange}`).join(', ')}`;
   }
 
-  prompt += `\n\nWhich tokens (if any) show a clear short-term setup? Return JSON: {"tokens":["SYM1"]} or {"tokens":[]}. Be very selective — only flag strong volume + momentum.`;
+  if (snapshot.socialRankings?.length) {
+    const topSocial = snapshot.socialRankings.slice(0, 5).map((s) => `${s.symbol} (${s.sentiment})`).join(', ');
+    prompt += `\n\nSOCIAL BUZZ: ${topSocial}`;
+  }
+
+  prompt += `\n\nWhich tokens (if any) show a clear short-term setup? Return JSON: {"tokens":["SYM1"]} or {"tokens":[]}. Be very selective — only flag strong volume + momentum + social buzz.`;
 
   return prompt;
 }
@@ -229,8 +234,9 @@ Each signal field should be a specific, data-backed observation — not generic.
 1. **NEW CEX LISTINGS** (highest priority): When a token gets newly listed on Binance, Coinbase, Robinhood, Backpack, or Gemini, this is often your strongest signal. New listings frequently see 20-100%+ pumps. Set confidence high (0.8+), TP aggressive (15-30%), SL tighter (5-8%).
 2. On-chain: whale movements, holder growth, large transfers vs. exchange deposits
 3. Volume: volume spikes relative to 24h average, buy/sell volume ratio
-4. Price action: trend, support/resistance, momentum
-5. Sentiment: social signals (low weight — easily manipulated)
+4. **Social mindshare**: If socialMindshare data is provided, tokens trending with positive sentiment and high mindshare rank deserve a closer look. A token that's #1-5 in social buzz with positive sentiment is a bullish confluence signal. Negative sentiment trending = avoid.
+5. **Prediction markets**: If predictionMarkets data is provided, crypto-related prediction markets with high volume and extreme probabilities (>80% or <20%) can signal upcoming catalysts or consensus shifts.
+6. Price action: trend, support/resistance, momentum
 
 Do not suggest meme coins under 24 hours old unless volume is exceptional (>$5M in 1h).
 
@@ -308,6 +314,26 @@ function buildUserPrompt(
       baseAsset: l.baseAsset,
       quoteAsset: l.quoteAsset,
       detectedMinutesAgo: Math.round((Date.now() - l.detectedAt) / 60000),
+    }));
+  }
+
+  // Social mindshare from Surf — which tokens are generating buzz
+  if (snapshot.socialRankings?.length) {
+    prompt.socialMindshare = snapshot.socialRankings.slice(0, 10).map((s) => ({
+      symbol: s.symbol,
+      name: s.name,
+      rank: s.rank,
+      sentiment: s.sentiment,
+      sentimentScore: s.sentimentScore,
+    }));
+  }
+
+  // Prediction market signals from Polymarket/Kalshi
+  if (snapshot.predictionSignals?.length) {
+    prompt.predictionMarkets = snapshot.predictionSignals.slice(0, 5).map((p) => ({
+      market: p.title,
+      probability: p.probability,
+      volume: p.volume,
     }));
   }
 

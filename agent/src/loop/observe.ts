@@ -15,6 +15,7 @@ import { CoinGeckoClient } from '../data/coingecko';
 import { PythClient } from '../data/pyth';
 import { HeliusClient } from '../data/helius';
 import { scanCEXListings } from '../data/cex-listings';
+import { getSurfEnrichment } from '../data/surf';
 import { TradingWallet } from '../wallet/trading';
 import { TradeRepository } from '../db/trades';
 import { logActivity } from '../db/activity';
@@ -84,12 +85,13 @@ export async function observeNode(
     }
 
     // ── Run data fetches in parallel ────────────────────────────────────
-    const [portfolio, cgTokens, globalMetrics, recentEvents, cexListings] = await Promise.allSettled([
+    const [portfolio, cgTokens, globalMetrics, recentEvents, cexListings, surfData] = await Promise.allSettled([
       fetchPortfolio(wallet),
       coingecko.getSolanaTokenMarkets(100),
       coingecko.getGlobalMetrics(),
       helius.getRecentEvents(50),
       scanCEXListings(),
+      getSurfEnrichment(),
     ]);
 
     let resolvedPortfolio =
@@ -120,6 +122,7 @@ export async function observeNode(
           };
     const resolvedEvents = recentEvents.status === 'fulfilled' ? recentEvents.value : [];
     const resolvedListings = cexListings.status === 'fulfilled' ? cexListings.value : [];
+    const resolvedSurf = surfData.status === 'fulfilled' ? surfData.value : { socialRankings: [], predictionSignals: [] };
 
     // ── Map CoinGecko tokens to TokenData with Solana mints ─────────────
     const tokenDataList: TokenData[] = resolvedCgTokens.map((t) => {
@@ -198,6 +201,8 @@ export async function observeNode(
       trendingTokens,
       recentEvents: resolvedEvents,
       newListings: resolvedListings,
+      socialRankings: resolvedSurf.socialRankings,
+      predictionSignals: resolvedSurf.predictionSignals,
     };
 
     const elapsed = Date.now() - startTime;
