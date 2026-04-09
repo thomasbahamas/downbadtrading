@@ -47,6 +47,10 @@ const COINGECKO_ID_TO_MINT: Record<string, string> = {
   sanctum: 'SANDrkY3p95a6MUzp7KhpqP4e4yEiHQ8VRj5s3bFEDW',
   wif: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
   popcat: '7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr',
+  hyperliquid: '98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g',
+  'wormhole-bridged-hype': '98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g',
+  zcash: 'A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS',
+  'omnibridge-bridged-zcash-solana': 'A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS',
 };
 
 // ─── Node ─────────────────────────────────────────────────────────────────

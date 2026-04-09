@@ -102,6 +102,7 @@ async function runLoop(): Promise<void> {
       const result = await graph.invoke({
         ...agentState,
         loopCount: globalLoopCount,
+        rotationTarget: null,
         error: null,
       });
       agentState = result as unknown as import('./types').AgentState;
@@ -213,10 +214,14 @@ function buildLoopSummary(state: import('./types').AgentState, loopNum: number):
   const hadThesis = !!state.thesis;
   const wasApproved = !!state.riskApproval?.approved;
   const wasExecuted = !!state.executionResult?.success;
+  const wasRotation = !!state.rotationTarget;
   const token = state.thesis?.token.symbol;
+  const rotatedFrom = state.rotationTarget?.token.symbol;
 
   let title: string;
-  if (wasExecuted) {
+  if (wasExecuted && wasRotation) {
+    title = `Loop #${loopNum}: Scanned ${tokensScanned} tokens → Rotated: closed ${rotatedFrom} → entered ${token}`;
+  } else if (wasExecuted) {
     title = `Loop #${loopNum}: Scanned ${tokensScanned} tokens → Generated thesis on ${token} → Approved → Executed`;
   } else if (hadThesis && !wasApproved) {
     title = `Loop #${loopNum}: Scanned ${tokensScanned} tokens → Generated thesis on ${token} → Rejected by risk engine`;
@@ -247,6 +252,8 @@ function buildLoopSummary(state: import('./types').AgentState, loopNum: number):
       wasApproved,
       rejectionReason: (!wasApproved && hadThesis) ? (state.riskApproval?.reason ?? null) : null,
       wasExecuted,
+      wasRotation,
+      rotatedFrom: rotatedFrom ?? null,
       openPositions: state.activePositions?.length ?? 0,
     },
   };

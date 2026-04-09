@@ -20,6 +20,7 @@ import { JupiterUltraClient } from '../jupiter/ultra';
 import { JupiterTriggerClient } from '../jupiter/trigger';
 import { TradingWallet } from '../wallet/trading';
 import { TradeRepository } from '../db/trades';
+import { logActivity } from '../db/activity';
 import { createLogger } from '../utils/logger';
 
 const logger = createLogger('execute');
@@ -44,6 +45,12 @@ export async function executeNode(
 
   const { thesis, riskApproval } = state;
   const positionSizeUsd = riskApproval.adjustedPositionSizeUsd ?? thesis.positionSizeUsd;
+
+  // ── Phase 0: Close rotation target if present ───────────────────
+  let activeAfterRotation = state.activePositions;
+  if (state.rotationTarget) {
+    activeAfterRotation = await closeRotationTarget(state, config);
+  }
 
   logger.info(
     `EXECUTE: buying ${thesis.token.symbol} for $${positionSizeUsd.toFixed(2)} ` +
@@ -161,7 +168,7 @@ export async function executeNode(
 
     return {
       executionResult: result,
-      activePositions: [...state.activePositions, position],
+      activePositions: [...activeAfterRotation, position],
     };
   } catch (err: unknown) {
     let message = err instanceof Error ? err.message : String(err);
@@ -181,6 +188,108 @@ export async function executeNode(
   }
 }
 
+// ─── Close rotation target ────────────────────────────────────────────────
+
+async function closeRotationTarget(
+  state: AgentState,
+  config: AgentConfig
+): Promise<Position[]> {
+  const target = state.rotationTarget!;
+  const db = new TradeRepository(config);
+
+  logger.info(
+    `EXECUTE: closing rotation target ${target.token.symbol} (id=${target.id})`
+  );
+
+  try {
+    // Get current price for P&L calculation
+    const currentToken = state.marketSnapshot?.tokens.find(
+      (t) => t.mint === target.token.mint
+    );
+    const exitPrice = currentToken?.priceUsd ?? target.entryPriceUsd;
+
+    if (config.paperTrade && target.jupiterOrderId.startsWith('PAPER_')) {
+      // Paper trade: just mark as closed
+      const realizedPnl = (exitPrice - target.entryPriceUsd) * target.entryTokenAmount;
+      const closedPosition: Position = {
+        ...target,
+        status: 'manual_close',
+        closedAt: Date.now(),
+        exitPriceUsd: exitPrice,
+        exitTxSignature: `PAPER_ROTATION_${Date.now()}`,
+        realizedPnl,
+        realizedPnlPct: realizedPnl / target.entrySizeUsd,
+      };
+      await db.updatePosition(closedPosition);
+
+      const pnlStr = `${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}`;
+      await logActivity(config, 'position_close',
+        `Rotation close: ${target.token.symbol} (${pnlStr}) → making room for ${state.thesis!.token.symbol}`,
+        `Closed to rotate into higher-conviction opportunity. Entry: $${target.entryPriceUsd.toFixed(4)} → Exit: $${exitPrice.toFixed(4)}`,
+        target.token.symbol,
+        { pnl: realizedPnl, pnlPct: closedPosition.realizedPnlPct, status: 'manual_close', reason: 'rotation' }
+      );
+
+      logger.info(`EXECUTE: rotation close (paper) — ${target.token.symbol} pnl=${pnlStr}`);
+    } else {
+      // Live trade: market sell via Jupiter Ultra
+      const ultra = new JupiterUltraClient(config);
+      const wallet = new TradingWallet(config);
+
+      const amountRaw = await wallet.getTokenBalanceRaw(target.token.mint);
+      const order = await ultra.getOrder({
+        inputMint: target.token.mint,
+        outputMint: USDC_MINT,
+        amount: amountRaw,
+        taker: wallet.getPublicKey(),
+      });
+
+      const signedTx = ultra.signTransaction(order.transaction!, {
+        sign: (tx) => wallet.signVersionedTransaction(tx),
+      });
+
+      const result = await ultra.execute({
+        signedTransaction: signedTx,
+        requestId: order.requestId,
+      });
+
+      if (result.status !== 'Success') {
+        throw new Error(`Rotation sell failed: code=${result.code} ${result.error}`);
+      }
+
+      const realizedPnl = (exitPrice - target.entryPriceUsd) * target.entryTokenAmount;
+      const closedPosition: Position = {
+        ...target,
+        status: 'manual_close',
+        closedAt: Date.now(),
+        exitPriceUsd: exitPrice,
+        exitTxSignature: result.signature,
+        realizedPnl,
+        realizedPnlPct: realizedPnl / target.entrySizeUsd,
+      };
+      await db.updatePosition(closedPosition);
+
+      const pnlStr = `${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}`;
+      await logActivity(config, 'position_close',
+        `Rotation close: ${target.token.symbol} (${pnlStr}) → making room for ${state.thesis!.token.symbol}`,
+        `Closed to rotate into higher-conviction opportunity. Entry: $${target.entryPriceUsd.toFixed(4)} → Exit: $${exitPrice.toFixed(4)}`,
+        target.token.symbol,
+        { pnl: realizedPnl, pnlPct: closedPosition.realizedPnlPct, status: 'manual_close', reason: 'rotation' }
+      );
+
+      logger.info(`EXECUTE: rotation sell confirmed — sig=${result.signature} pnl=${pnlStr}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`EXECUTE: rotation close failed for ${target.token.symbol}: ${msg}`);
+    // Don't abort the new trade — the rotation close failing shouldn't block entry
+    // The risk engine already re-checked without this position
+  }
+
+  // Return positions without the rotation target
+  return state.activePositions.filter((p) => p.id !== target.id);
+}
+
 // ─── Paper trade (no real txs) ────────────────────────────────────────────
 
 async function executePaperTrade(
@@ -191,6 +300,13 @@ async function executePaperTrade(
   if (!thesis) return { executionResult: { success: false, error: 'No thesis' } };
 
   const positionSizeUsd = riskApproval?.adjustedPositionSizeUsd ?? thesis.positionSizeUsd;
+
+  // Handle rotation in paper trade mode
+  let activeAfterRotation = state.activePositions;
+  if (state.rotationTarget) {
+    activeAfterRotation = await closeRotationTarget(state, config);
+  }
+
   const fakeSig = `PAPER_${thesis.id.slice(0, 8)}`;
   const fakeOrderId = `PAPER_OCO_${thesis.id.slice(0, 8)}`;
 
@@ -229,6 +345,6 @@ async function executePaperTrade(
       entryPriceUsd: thesis.entryPriceUsd,
       amountOut: String(positionSizeUsd / thesis.entryPriceUsd),
     },
-    activePositions: [...state.activePositions, position],
+    activePositions: [...activeAfterRotation, position],
   };
 }

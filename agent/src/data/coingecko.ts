@@ -52,6 +52,10 @@ interface CoinGeckoMarketItem {
   atl_date: string | null;
 }
 
+// Tokens to always include in scans, even if not in the solana-ecosystem category.
+// These get fetched separately and merged into the token list.
+const ALWAYS_INCLUDE_IDS = ['hyperliquid', 'zcash', 'wormhole-bridged-hype', 'omnibridge-bridged-zcash-solana'];
+
 export class CoinGeckoClient {
   private readonly baseUrl: string;
   private readonly apiKey: string;
@@ -195,6 +199,51 @@ export class CoinGeckoClient {
 
         // Rate limit: CoinGecko free tier allows ~10-30 req/min
         if (page < pages) await new Promise((r) => setTimeout(r, 1500));
+      }
+
+      // Fetch always-include tokens that may not be in the solana-ecosystem category
+      const existingIds = new Set(allTokens.map((t) => t.mint));
+      const missingIds = ALWAYS_INCLUDE_IDS.filter((id) => !existingIds.has(id));
+
+      if (missingIds.length > 0) {
+        try {
+          await new Promise((r) => setTimeout(r, 1500)); // rate limit
+          const supplemental = await axios.get<CoinGeckoMarketItem[]>(
+            `${this.baseUrl}/coins/markets`,
+            {
+              params: {
+                vs_currency: 'usd',
+                ids: missingIds.join(','),
+                order: 'volume_desc',
+                sparkline: false,
+                price_change_percentage: '1h,24h',
+              },
+              headers: this.headers,
+              timeout: 15_000,
+            }
+          );
+
+          if (supplemental.data) {
+            const extras: TokenData[] = supplemental.data.map((coin) => ({
+              mint: coin.id,
+              symbol: coin.symbol.toUpperCase(),
+              name: coin.name,
+              priceUsd: coin.current_price ?? 0,
+              priceChange1h: coin.price_change_percentage_1h_in_currency ?? 0,
+              priceChange24h: coin.price_change_percentage_24h ?? 0,
+              volume24h: coin.total_volume ?? 0,
+              volumeChange24h: 0,
+              marketCap: coin.market_cap ?? 0,
+              liquidity: coin.total_volume ?? 0,
+              holderCount: 0,
+              createdAt: coin.atl_date ? new Date(coin.atl_date).getTime() : 0,
+            }));
+            allTokens.push(...extras);
+            logger.info(`getSolanaTokenMarkets: added ${extras.length} supplemental tokens (${extras.map(t => t.symbol).join(', ')})`);
+          }
+        } catch (suppErr) {
+          logger.debug(`Supplemental token fetch failed: ${suppErr}`);
+        }
       }
 
       // Filter out tokens with negligible volume

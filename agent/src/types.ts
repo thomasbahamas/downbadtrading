@@ -74,6 +74,8 @@ export interface AgentState {
   loopCount: number;
   /** Timestamp of last OBSERVE run */
   lastObserveTime: number;
+  /** Position to close for capital rotation (set in DECIDE, executed in EXECUTE) */
+  rotationTarget: Position | null;
   /** Any error that should abort this loop iteration */
   error: string | null;
 }
