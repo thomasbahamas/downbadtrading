@@ -157,6 +157,40 @@ export async function observeNode(
       { tokensScanned: tokenDataWithPyth.length, events: resolvedEvents.length, newListings: resolvedListings.length }
     );
 
+    // ── Enrich portfolio holdings with market prices ─────────────────
+    // The wallet fetcher returns holdings with valueUsd=0. Price them
+    // from the token data so totalValueUsd reflects the full wallet.
+    if (resolvedPortfolio.holdings.length > 0) {
+      let holdingsValue = 0;
+      const enrichedHoldings = resolvedPortfolio.holdings.map((h) => {
+        const tokenInfo = tokenDataWithPyth.find((t) => t.mint === h.mint);
+        if (tokenInfo && tokenInfo.priceUsd > 0) {
+          const val = h.amount * tokenInfo.priceUsd;
+          holdingsValue += val;
+          return { ...h, symbol: tokenInfo.symbol, valueUsd: val };
+        }
+        return h;
+      });
+      const solValueUsd = resolvedPortfolio.solBalance * resolvedGlobals.solPriceUsd;
+      resolvedPortfolio = {
+        ...resolvedPortfolio,
+        holdings: enrichedHoldings,
+        totalValueUsd: resolvedPortfolio.usdcBalance + holdingsValue + solValueUsd,
+      };
+      if (holdingsValue > 0) {
+        logger.info(`OBSERVE: portfolio enriched — ${enrichedHoldings.filter(h => h.valueUsd > 0).length} holdings worth $${holdingsValue.toFixed(2)}`);
+      }
+    } else {
+      // No holdings — total = USDC + SOL value
+      const solValueUsd = resolvedPortfolio.solBalance * resolvedGlobals.solPriceUsd;
+      if (solValueUsd > 0.01) {
+        resolvedPortfolio = {
+          ...resolvedPortfolio,
+          totalValueUsd: resolvedPortfolio.usdcBalance + solValueUsd,
+        };
+      }
+    }
+
     const snapshot: MarketSnapshot = {
       timestamp: Date.now(),
       tokens: tokenDataWithPyth,

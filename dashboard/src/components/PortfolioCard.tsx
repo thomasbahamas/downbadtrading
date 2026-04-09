@@ -12,10 +12,18 @@ interface Props {
   totalTrades: number;
 }
 
+interface HeartbeatHolding {
+  symbol: string;
+  mint: string;
+  amount: number;
+  valueUsd: number;
+}
+
 interface HeartbeatWallet {
   portfolioValueUsd: number;
   usdcBalance: number;
   solBalance: number;
+  holdings?: HeartbeatHolding[];
 }
 
 function pnlColor(n: number): string {
@@ -86,6 +94,18 @@ export default function PortfolioCard({
           <p className="text-xs text-gray-600 mt-0.5">
             {formatUsd(wallet.usdcBalance)} USDC + {wallet.solBalance.toFixed(4)} SOL
           </p>
+        )}
+        {wallet?.holdings && wallet.holdings.length > 0 && (
+          <div className="mt-1.5 space-y-0.5">
+            {wallet.holdings.map((h) => (
+              <div key={h.mint} className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">
+                  {h.amount.toLocaleString(undefined, { maximumFractionDigits: 2 })} {h.symbol}
+                </span>
+                <span className="text-gray-300 mono">{formatUsd(h.valueUsd)}</span>
+              </div>
+            ))}
+          </div>
         )}
         {dailyPnl !== 0 && (
           <div className="flex items-center gap-2 mt-1">

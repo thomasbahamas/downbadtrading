@@ -121,6 +121,9 @@ async function runLoop(): Promise<void> {
             portfolioValueUsd: agentState.portfolio?.totalValueUsd ?? 0,
             usdcBalance: agentState.portfolio?.usdcBalance ?? 0,
             solBalance: agentState.portfolio?.solBalance ?? 0,
+            holdings: (agentState.portfolio?.holdings ?? [])
+              .filter(h => h.valueUsd > 0)
+              .map(h => ({ symbol: h.symbol, mint: h.mint, amount: h.amount, valueUsd: h.valueUsd })),
             timestamp: new Date().toISOString(),
             lastError: agentState.error ?? null,
           },
