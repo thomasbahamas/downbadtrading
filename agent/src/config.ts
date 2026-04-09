@@ -73,6 +73,7 @@ const envSchema = z.object({
   MAX_CONSECUTIVE_LOSSES: z.coerce.number().int().positive().default(3),
   MAX_DRAWDOWN_PCT: z.coerce.number().positive().default(15),
   ORDER_EXPIRY_DAYS: z.coerce.number().int().positive().default(7),
+  BLACKLISTED_MINTS: z.string().default(''),
 
   // System
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
@@ -128,8 +129,7 @@ function buildConfig(env: RawEnv): AgentConfig {
     maxConsecutiveLosses: env.MAX_CONSECUTIVE_LOSSES,
     maxDrawdownPct: env.MAX_DRAWDOWN_PCT,
     orderExpiryDays: env.ORDER_EXPIRY_DAYS,
-    // Populate from env if you add BLACKLISTED_MINTS / WHITELISTED_MINTS vars
-    blacklistedMints: [],
+    blacklistedMints: buildBlacklist(env.BLACKLISTED_MINTS),
     whitelistedMints: [],
   };
 
@@ -163,6 +163,23 @@ function buildConfig(env: RawEnv): AgentConfig {
     logLevel: env.LOG_LEVEL,
     port: env.PORT,
   };
+}
+
+// ─── Blacklist ─────────────────────────────────────────────────────────
+// Always-blacklisted mints (hardcoded) + user-supplied via env var.
+// DRIFT was hacked — never trade it. Add others as needed.
+
+const ALWAYS_BLACKLISTED = [
+  'DriFtupJYLTosbwoN8koMbEYSx54aFAVLddWsbksjwg7', // DRIFT
+];
+
+function buildBlacklist(envValue: string): string[] {
+  const fromEnv = envValue
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // Dedupe
+  return [...new Set([...ALWAYS_BLACKLISTED, ...fromEnv])];
 }
 
 // ─── Singleton ─────────────────────────────────────────────────────────────
