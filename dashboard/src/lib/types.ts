@@ -73,3 +73,26 @@ export interface AgentActivity {
   metadata: Record<string, unknown>;
   created_at: string;
 }
+
+export interface WatchlistEntry {
+  id: string;
+  scan_date: string;
+  rank: number;
+  token_symbol: string;
+  token_mint: string;
+  token_name: string | null;
+  thesis: string;
+  signals: Record<string, string>;
+  confidence: number;
+  rr_ratio: number;
+  entry_price_target: number | null;
+  tp_target: number | null;
+  sl_target: number | null;
+  current_price: number | null;
+  last_score: number;
+  score_history: Array<{ time: string; score: number }>;
+  status: 'watching' | 'taken' | 'dropped';
+  trade_id: string | null;
+  created_at: string;
+  updated_at: string;
+}

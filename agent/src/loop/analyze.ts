@@ -17,7 +17,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { v4 as uuidv4 } from 'uuid';
-import type { AgentState, AgentConfig, TradeThesis, MarketSnapshot, Portfolio } from '../types';
+import type { AgentState, AgentConfig, TradeThesis, MarketSnapshot, Portfolio, WatchlistEntry } from '../types';
+import { WatchlistRepository } from '../db/watchlist';
 import { logActivity } from '../db/activity';
 import { createLogger } from '../utils/logger';
 
@@ -104,7 +105,7 @@ function cacheMarketState(snapshot: MarketSnapshot, noTradeReason: string | null
 
 // ─── Layer 3: Haiku screening prompt ──────────────────────────────────────
 
-function buildScreeningPrompt(snapshot: MarketSnapshot): string {
+function buildScreeningPrompt(snapshot: MarketSnapshot, watchlist?: WatchlistEntry[]): string {
   const tokens = [...snapshot.tokens]
     .sort((a, b) => b.volume24h - a.volume24h)
     .slice(0, 15)
@@ -112,6 +113,16 @@ function buildScreeningPrompt(snapshot: MarketSnapshot): string {
 
   let prompt = `Solana token screener. F&G: ${snapshot.globalMetrics.fearGreedIndex}. SOL: $${snapshot.globalMetrics.solPriceUsd.toFixed(2)}.\n\n`;
   prompt += tokens.join('\n');
+
+  // Inject today's watchlist — these are pre-vetted candidates, weight them higher
+  const activeWatchlist = watchlist?.filter((w) => w.status !== 'dropped') ?? [];
+  if (activeWatchlist.length > 0) {
+    prompt += `\n\nDAILY WATCHLIST (pre-vetted, prioritize these):`;
+    for (const w of activeWatchlist) {
+      const status = w.status === 'taken' ? ' [TAKEN]' : '';
+      prompt += `\n  #${w.rank} ${w.token.symbol}${status}: score=${w.lastScore.toFixed(0)} conf=${(w.confidence * 100).toFixed(0)}% entry=$${w.entryPriceTarget.toPrecision(4)}`;
+    }
+  }
 
   if (snapshot.newListings?.length) {
     prompt += `\n\nNEW CEX LISTINGS: ${snapshot.newListings.map((l) => `${l.baseAsset} on ${l.exchange}`).join(', ')}`;
@@ -122,16 +133,17 @@ function buildScreeningPrompt(snapshot: MarketSnapshot): string {
     prompt += `\n\nSOCIAL BUZZ: ${topSocial}`;
   }
 
-  prompt += `\n\nWhich tokens (if any) show a clear short-term setup? Return JSON: {"tokens":["SYM1"]} or {"tokens":[]}. Be very selective — only flag strong volume + momentum + social buzz.`;
+  prompt += `\n\nWhich tokens (if any) show a clear short-term setup? Strongly prefer watchlist tokens — they've been deeply analyzed. Return JSON: {"tokens":["SYM1"]} or {"tokens":[]}. Be very selective — only flag strong volume + momentum + social buzz.`;
 
   return prompt;
 }
 
 async function runHaikuScreening(
   snapshot: MarketSnapshot,
-  config: AgentConfig
+  config: AgentConfig,
+  watchlist?: WatchlistEntry[]
 ): Promise<string[]> {
-  const prompt = buildScreeningPrompt(snapshot);
+  const prompt = buildScreeningPrompt(snapshot, watchlist);
 
   try {
     let raw: string;
@@ -251,7 +263,8 @@ Return ONLY the JSON object — no preamble, no explanation, no markdown code fe
 function buildUserPrompt(
   snapshot: MarketSnapshot,
   portfolio: Portfolio,
-  focusTokens?: string[]
+  focusTokens?: string[],
+  watchlist?: WatchlistEntry[]
 ): string {
   let tokenList = [...snapshot.tokens]
     .sort((a, b) => b.volume24h - a.volume24h);
@@ -337,12 +350,33 @@ function buildUserPrompt(
     }));
   }
 
+  // Inject daily watchlist context — these are the day's pre-vetted top candidates
+  const activeWatchlist = watchlist?.filter((w) => w.status !== 'dropped') ?? [];
+  if (activeWatchlist.length > 0) {
+    prompt.dailyWatchlist = activeWatchlist.map((w) => ({
+      rank: w.rank,
+      symbol: w.token.symbol,
+      mint: w.token.mint,
+      status: w.status,
+      morningScore: w.lastScore,
+      morningConfidence: w.confidence,
+      entryTarget: w.entryPriceTarget,
+      tp: w.tpTarget,
+      sl: w.slTarget,
+      thesisSummary: w.thesis.slice(0, 150),
+    }));
+  }
+
   let header =
     `Analyze the following Solana market data and identify the single best trade opportunity, ` +
     `or return a no-trade signal if conditions don't warrant a position.\n\n` +
     `Portfolio: $${portfolio.totalValueUsd.toFixed(0)} total, ` +
     `$${portfolioSummary.availableUsd.toFixed(0)} available, ` +
     `${portfolioSummary.openPositions} open positions\n\n`;
+
+  if (activeWatchlist.length > 0) {
+    header += `*** TODAY'S WATCHLIST ACTIVE — Strongly prefer these pre-analyzed candidates unless market data clearly contradicts. ***\n\n`;
+  }
 
   if (focusTokens && focusTokens.length > 0 && !focusTokens.includes('FALLBACK')) {
     header += `*** SCREENER FLAGGED: ${focusTokens.join(', ')} — prioritize these ***\n\n`;
@@ -525,9 +559,21 @@ export async function analyzeNode(
 
   logger.info('ANALYZE: market changed or forced check — running LLM pipeline…');
 
+  // ── Fetch today's watchlist ─────────────────────────────────────────
+  let watchlist: WatchlistEntry[] = [];
   try {
-    // ── Layer 3: Haiku screening ──────────────────────────────────────
-    const flaggedTokens = await runHaikuScreening(snapshot, config);
+    const watchlistRepo = new WatchlistRepository(config);
+    watchlist = await watchlistRepo.getTodayWatchlist();
+    if (watchlist.length > 0) {
+      logger.info(`ANALYZE: loaded ${watchlist.length} watchlist entries (top: ${watchlist[0].token.symbol})`);
+    }
+  } catch (err) {
+    logger.debug(`ANALYZE: watchlist fetch failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  try {
+    // ── Layer 3: Haiku screening (now watchlist-aware) ────────────────
+    const flaggedTokens = await runHaikuScreening(snapshot, config, watchlist);
 
     if (flaggedTokens.length === 0) {
       // Haiku says nothing interesting — skip Sonnet entirely
@@ -537,17 +583,19 @@ export async function analyzeNode(
         `No trade: ${noTradeReason}`,
         `Haiku screened ${snapshot.tokens.length} tokens — none flagged`,
         undefined,
-        { tokensAnalyzed: snapshot.tokens.length, skipReason: 'haiku_no_flags' }
+        { tokensAnalyzed: snapshot.tokens.length, skipReason: 'haiku_no_flags', watchlistSize: watchlist.length }
       );
       cacheMarketState(snapshot, noTradeReason);
+      // Still update watchlist prices even on no-trade
+      await updateWatchlistPrices(watchlist, snapshot, config);
       return { thesis: null };
     }
 
-    // ── Layer 4: Sonnet full analysis ─────────────────────────────────
+    // ── Layer 4: Sonnet full analysis (now watchlist-aware) ──────────
     logger.info(`ANALYZE: Haiku flagged ${flaggedTokens.join(', ')} — calling Sonnet for full analysis`);
 
     const systemPrompt = buildSystemPrompt();
-    const userPrompt = buildUserPrompt(snapshot, state.portfolio, flaggedTokens);
+    const userPrompt = buildUserPrompt(snapshot, state.portfolio, flaggedTokens, watchlist);
 
     const rawResponse = await callLLM(systemPrompt, userPrompt, config);
     const thesis = parseLLMResponse(rawResponse, snapshot, config, state.portfolio);
@@ -556,7 +604,8 @@ export async function analyzeNode(
       await logActivity(config, 'thesis',
         `Generated thesis: BUY ${thesis.token.symbol} @ $${thesis.entryPriceUsd.toFixed(4)}`,
         thesis.reasoning, thesis.token.symbol,
-        { confidence: thesis.confidenceScore, rr: thesis.riskRewardRatio, tp: thesis.takeProfitUsd, sl: thesis.stopLossUsd }
+        { confidence: thesis.confidenceScore, rr: thesis.riskRewardRatio, tp: thesis.takeProfitUsd, sl: thesis.stopLossUsd,
+          onWatchlist: watchlist.some((w) => w.token.symbol === thesis.token.symbol) }
       );
       // Clear no-trade cache since we have a thesis
       cacheMarketState(snapshot, null);
@@ -571,16 +620,68 @@ export async function analyzeNode(
         `No trade: ${noTradeReason}`,
         `Sonnet analyzed flagged tokens (${flaggedTokens.join(', ')}) — passed`,
         undefined,
-        { tokensAnalyzed: snapshot.tokens.length, flaggedTokens, skipReason: 'sonnet_no_trade' }
+        { tokensAnalyzed: snapshot.tokens.length, flaggedTokens, skipReason: 'sonnet_no_trade', watchlistSize: watchlist.length }
       );
       cacheMarketState(snapshot, noTradeReason);
     }
+
+    // ── Update watchlist scores based on current market data ─────────
+    await updateWatchlistPrices(watchlist, snapshot, config);
 
     return { thesis };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error(`ANALYZE failed: ${message}`);
     return { thesis: null, error: `analyze: ${message}` };
+  }
+}
+
+// ─── Watchlist score updater ─────────────────────────────────────────────────
+// Runs after each analysis to keep watchlist current with live prices and scores
+
+async function updateWatchlistPrices(
+  watchlist: WatchlistEntry[],
+  snapshot: MarketSnapshot,
+  config: AgentConfig
+): Promise<void> {
+  if (watchlist.length === 0) return;
+
+  const repo = new WatchlistRepository(config);
+  const tokenMap = new Map(snapshot.tokens.map((t) => [t.symbol, t]));
+
+  for (const entry of watchlist) {
+    if (entry.status === 'dropped') continue;
+
+    const token = tokenMap.get(entry.token.symbol);
+    if (!token) continue;
+
+    // Re-score: weighted combination of price momentum, volume, and distance from entry
+    const priceVsEntry = entry.entryPriceTarget > 0
+      ? (token.priceUsd - entry.entryPriceTarget) / entry.entryPriceTarget
+      : 0;
+    const momentum1h = token.priceChange1h ?? 0;
+    const momentum24h = token.priceChange24h ?? 0;
+
+    // Score: base from morning + adjustments for intraday movement
+    // Positive momentum near entry = score boost, price falling below SL = score penalty
+    let adjustedScore = entry.lastScore;
+    adjustedScore += momentum1h * 1.5;          // Recent momentum weight
+    adjustedScore += momentum24h * 0.5;          // 24h trend weight
+    if (priceVsEntry < -0.10) adjustedScore -= 15; // Falling hard below entry = big penalty
+    if (token.priceUsd <= entry.slTarget) adjustedScore -= 30; // At or below SL = drop candidate
+
+    adjustedScore = Math.max(0, Math.min(100, adjustedScore));
+
+    // Update current price + score
+    try {
+      await repo.appendScoreHistory(entry.id, adjustedScore);
+      await repo.updateEntry(entry.id, {
+        currentPrice: token.priceUsd,
+        lastScore: adjustedScore,
+      });
+    } catch {
+      // Non-fatal
+    }
   }
 }
 

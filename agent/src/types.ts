@@ -619,6 +619,56 @@ export interface DailyPerformanceLog {
 }
 
 // ============================================================
+// Daily Watchlist
+// ============================================================
+
+export type WatchlistStatus = 'watching' | 'taken' | 'dropped';
+
+export interface WatchlistEntry {
+  id: string;
+  scanDate: string; // YYYY-MM-DD
+  rank: number;
+  token: { symbol: string; mint: string; name: string };
+  thesis: string;
+  signals: { priceAction: string; volume: string; socialSentiment: string; onChainMetrics: string };
+  confidence: number;
+  rrRatio: number;
+  entryPriceTarget: number;
+  tpTarget: number;
+  slTarget: number;
+  currentPrice: number;
+  lastScore: number;
+  scoreHistory: Array<{ time: string; score: number }>;
+  status: WatchlistStatus;
+  tradeId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WatchlistEntryRow {
+  id: string;
+  scan_date: string;
+  rank: number;
+  token_symbol: string;
+  token_mint: string;
+  token_name: string | null;
+  thesis: string;
+  signals: Record<string, string>;
+  confidence: number;
+  rr_ratio: number;
+  entry_price_target: number | null;
+  tp_target: number | null;
+  sl_target: number | null;
+  current_price: number | null;
+  last_score: number;
+  score_history: Array<{ time: string; score: number }>;
+  status: WatchlistStatus;
+  trade_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// ============================================================
 // Agent Config (runtime, after zod parse)
 // ============================================================
 

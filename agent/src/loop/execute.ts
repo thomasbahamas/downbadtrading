@@ -20,6 +20,7 @@ import { JupiterUltraClient } from '../jupiter/ultra';
 import { JupiterTriggerClient } from '../jupiter/trigger';
 import { TradingWallet } from '../wallet/trading';
 import { TradeRepository } from '../db/trades';
+import { WatchlistRepository } from '../db/watchlist';
 import { logActivity } from '../db/activity';
 import { createLogger } from '../utils/logger';
 
@@ -157,6 +158,19 @@ export async function executeNode(
       disposition: 'executed',
       rejectionReason: null,
     });
+
+    // Mark watchlist entry as "taken" if this token is on today's watchlist
+    try {
+      const watchlistRepo = new WatchlistRepository(config);
+      const watchlist = await watchlistRepo.getTodayWatchlist();
+      const match = watchlist.find((w) => w.token.symbol === thesis.token.symbol && w.status === 'watching');
+      if (match) {
+        await watchlistRepo.updateEntry(match.id, { status: 'taken', tradeId: position.id });
+        logger.info(`EXECUTE: marked watchlist entry #${match.rank} ${match.token.symbol} as taken`);
+      }
+    } catch {
+      // Non-fatal — don't break execution over watchlist update
+    }
 
     const result: ExecutionResult = {
       success: true,

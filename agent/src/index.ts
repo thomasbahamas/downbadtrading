@@ -16,6 +16,7 @@ import { TelegramClient } from './notifications/telegram';
 import { getSupabaseClient } from './db/client';
 import { logActivity } from './db/activity';
 import { createInitialState } from './loop/graph';
+import { scheduleMorningScan } from './loop/scheduler';
 import http from 'http';
 
 const logger = createLogger('index');
@@ -200,6 +201,10 @@ function setupGracefulShutdown(server: http.Server): void {
 async function main(): Promise<void> {
   const server = startHealthServer(config.port);
   setupGracefulShutdown(server);
+
+  // Schedule daily morning scan at 5 AM PST
+  scheduleMorningScan(config);
+
   await runLoop();
 }
 

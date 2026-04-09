@@ -190,6 +190,46 @@ CREATE POLICY "anon_select_agent_activity"
 
 
 -- =============================================================
+-- daily_watchlist — Top 10 ranked candidates per day
+-- Morning scan at 5 AM PST generates the initial list.
+-- Regular loops re-score and re-rank throughout the day.
+-- =============================================================
+CREATE TABLE IF NOT EXISTS daily_watchlist (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scan_date           DATE NOT NULL,
+    rank                INT NOT NULL CHECK (rank >= 1 AND rank <= 10),
+    token_symbol        TEXT NOT NULL,
+    token_mint          TEXT NOT NULL,
+    token_name          TEXT,
+    thesis              TEXT NOT NULL,
+    signals             JSONB DEFAULT '{}',
+    confidence          NUMERIC(4,3) NOT NULL,
+    rr_ratio            NUMERIC(8,4) NOT NULL,
+    entry_price_target  NUMERIC(20,10),
+    tp_target           NUMERIC(20,10),
+    sl_target           NUMERIC(20,10),
+    current_price       NUMERIC(20,10),
+    last_score          NUMERIC(6,3) NOT NULL DEFAULT 0,
+    score_history       JSONB DEFAULT '[]',
+    status              TEXT NOT NULL DEFAULT 'watching'
+                            CHECK (status IN ('watching', 'taken', 'dropped')),
+    trade_id            UUID REFERENCES trades(id),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_watchlist_date_rank ON daily_watchlist(scan_date, rank);
+CREATE INDEX idx_watchlist_date ON daily_watchlist(scan_date DESC);
+CREATE INDEX idx_watchlist_status ON daily_watchlist(status);
+CREATE INDEX idx_watchlist_token ON daily_watchlist(token_symbol);
+
+ALTER TABLE daily_watchlist ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "anon_select_daily_watchlist"
+    ON daily_watchlist FOR SELECT USING (TRUE);
+
+
+-- =============================================================
 -- Useful views for the dashboard
 -- =============================================================
 
