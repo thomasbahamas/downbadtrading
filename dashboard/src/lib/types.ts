@@ -74,6 +74,33 @@ export interface AgentActivity {
   created_at: string;
 }
 
+export interface Pool {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  wallet_address: string | null;
+  profit_wallet: string | null;
+  is_public: boolean;
+  is_default: boolean;
+  display_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PoolStats {
+  pool_id: string;
+  slug: string;
+  name: string;
+  is_default: boolean;
+  total_trades: number;
+  open_positions: number;
+  wins: number;
+  losses: number;
+  win_rate: number;
+  total_pnl: number;
+}
+
 export interface WatchlistEntry {
   id: string;
   scan_date: string;

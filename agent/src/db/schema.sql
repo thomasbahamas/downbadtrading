@@ -249,3 +249,14 @@ SELECT
     COALESCE(AVG(realized_pnl_pct) FILTER (WHERE status = 'tp_hit'), 0) AS avg_winner_pct,
     COALESCE(AVG(realized_pnl_pct) FILTER (WHERE status = 'sl_hit'), 0) AS avg_loser_pct
 FROM trades;
+
+
+-- =============================================================
+-- Migrations
+-- =============================================================
+-- After running this file, also run every file in migrations/ in order:
+--
+--   migrations/001_pools.sql — read-only pools scaffolding
+--
+-- Migrations are additive, idempotent, and safe to run on a live database.
+-- See agent/src/db/migrations/ for the canonical list.

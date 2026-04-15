@@ -1,6 +1,7 @@
 'use client';
 
 import type { Trade } from '@/lib/types';
+import CollapsibleThesis from './CollapsibleThesis';
 
 interface Props {
   positions: Trade[];
@@ -84,27 +85,23 @@ export default function ActivePositions({ positions }: Props) {
                 </div>
               </div>
 
-              {/* Trade reasoning */}
+              {/* Reasoning + signals — collapsed by default so the active
+                  positions list stays scannable. Expanding reveals the full
+                  thesis and the signal breakdown. */}
               {pos.reasoning && (
                 <div className="mt-2 pt-2 border-t border-surface-border/30">
-                  <p className="text-xs text-gray-500">
-                    <span className="text-gray-400 font-medium">Why: </span>
-                    {pos.reasoning}
-                  </p>
-                </div>
-              )}
-
-              {/* Signal breakdown */}
-              {pos.signals && typeof pos.signals === 'object' && Object.keys(pos.signals).length > 0 && (
-                <div className="grid grid-cols-2 gap-1 mt-1.5">
-                  {Object.entries(pos.signals)
-                    .filter(([, v]) => v && v !== 'n/a' && v !== '')
-                    .map(([key, value]) => (
-                      <p key={key} className="text-xs text-gray-600">
-                        <span className="capitalize">{key.replace(/([A-Z])/g, ' $1').trim()}</span>: {value}
-                      </p>
-                    ))
-                  }
+                  <CollapsibleThesis
+                    text={pos.reasoning}
+                    previewChars={140}
+                    label="Why"
+                    signals={
+                      pos.signals && typeof pos.signals === 'object'
+                        ? (Object.entries(pos.signals).filter(
+                            ([, v]) => v && v !== 'n/a' && v !== ''
+                          ) as Array<[string, string]>)
+                        : undefined
+                    }
+                  />
                 </div>
               )}
 

@@ -1,6 +1,7 @@
 'use client';
 
 import type { Trade } from '@/lib/types';
+import CollapsibleThesis from './CollapsibleThesis';
 
 interface Props {
   trades: Trade[];
@@ -155,11 +156,13 @@ export default function TradeRecommendations({ trades, tokensScannedPerLoop }: P
                 </div>
               </div>
 
-              {/* THE THESIS — the primary content */}
+              {/* THE THESIS — collapsed by default, click to expand for full
+                  reasoning + signal breakdown. Keeps the feed scannable. */}
               <div className="mt-3">
-                <p className="text-sm text-gray-200 leading-relaxed">
-                  {trade.reasoning}
-                </p>
+                <CollapsibleThesis
+                  text={trade.reasoning ?? ''}
+                  signals={signals as Array<[string, string]>}
+                />
               </div>
 
               {/* Trade levels grid */}
@@ -204,22 +207,8 @@ export default function TradeRecommendations({ trades, tokensScannedPerLoop }: P
                 )}
               </div>
 
-              {/* Signal breakdown */}
-              {signals.length > 0 && (
-                <div className="mt-3 pt-3 border-t border-surface-border/30">
-                  <p className="text-[10px] uppercase tracking-wider text-gray-600 mb-2">Signal Breakdown</p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {signals.map(([key, value]) => (
-                      <div key={key} className="flex gap-2">
-                        <span className="text-[10px] uppercase tracking-wider text-gray-600 min-w-[85px] pt-0.5 flex-shrink-0">
-                          {formatSignalLabel(key)}
-                        </span>
-                        <span className="text-xs text-gray-400 leading-relaxed">{value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+              {/* Signal breakdown is now inside CollapsibleThesis (shown when
+                  the user expands the thesis) — avoids duplicating it here. */}
 
               {/* Transaction links */}
               {(trade.entry_tx || trade.exit_tx) && (
@@ -259,14 +248,4 @@ function formatPrice(price: number): string {
   if (price >= 1) return price.toFixed(4);
   if (price >= 0.01) return price.toFixed(5);
   return price.toPrecision(4);
-}
-
-function formatSignalLabel(key: string): string {
-  const map: Record<string, string> = {
-    priceAction: 'Price',
-    volume: 'Volume',
-    socialSentiment: 'Sentiment',
-    onChainMetrics: 'On-Chain',
-  };
-  return map[key] || key.replace(/([A-Z])/g, ' $1').trim();
 }

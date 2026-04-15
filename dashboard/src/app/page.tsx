@@ -1,25 +1,62 @@
 import { supabase } from '@/lib/supabase';
+import { getPools, pickDefaultPool } from '@/lib/pools';
 import type { Trade, TradeStats, AgentActivity } from '@/lib/types';
 import PortfolioCard from '@/components/PortfolioCard';
 import ActivePositions from '@/components/ActivePositions';
 import AgentStatus from '@/components/AgentStatus';
 import StatsBar from '@/components/StatsBar';
 import LiveFeed from '@/components/LiveFeed';
-import EquityCurve from '@/components/EquityCurve';
+import PerformanceCharts from '@/components/PerformanceCharts';
 import TradeRecommendations from '@/components/TradeRecommendations';
+import DashboardShell from '@/components/DashboardShell';
+import PoolsPanel from '@/components/PoolsPanel';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-async function getData() {
+interface PageProps {
+  searchParams?: { pool?: string };
+}
+
+async function getData(activePoolId: string | null) {
+  // Scope by pool only when the activePoolId looks real. The pools migration
+  // (001_pools.sql) adds a pool_id column and backfills existing rows to the
+  // default pool. Pre-migration installs get the "fallback-main" synthetic
+  // id and we skip the filter entirely.
+  const scopeByPool = activePoolId !== null && !activePoolId.startsWith('fallback');
+
+  // Build queries inline rather than through a generic helper — Supabase's
+  // query-builder types are too complex to infer through a generic wrapper
+  // (TS2589 "instantiation excessively deep").
+  let positionsQuery = supabase.from('trades').select('*').eq('status', 'open');
+  let recentQuery = supabase.from('trades').select('*');
+  let closedQuery = supabase
+    .from('trades')
+    .select('realized_pnl, realized_pnl_pct, closed_at, opened_at, position_size_usd, status, token_symbol')
+    .neq('status', 'open')
+    .neq('status', 'pending_approval')
+    .not('realized_pnl', 'is', null);
+  let activityQuery = supabase.from('agent_activity').select('*');
+  let thesesCountQuery = supabase
+    .from('agent_activity')
+    .select('id', { count: 'exact', head: true })
+    .eq('type', 'thesis');
+
+  if (scopeByPool) {
+    positionsQuery = positionsQuery.eq('pool_id', activePoolId);
+    recentQuery = recentQuery.eq('pool_id', activePoolId);
+    closedQuery = closedQuery.eq('pool_id', activePoolId);
+    activityQuery = activityQuery.eq('pool_id', activePoolId);
+    thesesCountQuery = thesesCountQuery.eq('pool_id', activePoolId);
+  }
+
   const [positionsRes, statsRes, recentRes, closedRes, activityRes, thesesCountRes] = await Promise.all([
-    supabase.from('trades').select('*').eq('status', 'open').order('opened_at', { ascending: false }),
+    positionsQuery.order('opened_at', { ascending: false }),
     supabase.from('trade_stats').select('*').single(),
-    supabase.from('trades').select('*').order('opened_at', { ascending: false }).limit(20),
-    supabase.from('trades').select('realized_pnl, realized_pnl_pct, closed_at, opened_at, position_size_usd').neq('status', 'open').neq('status', 'pending_approval').not('realized_pnl', 'is', null),
-    supabase.from('agent_activity').select('*').order('created_at', { ascending: false }).limit(50),
-    // Count total theses generated (includes rejected ones)
-    supabase.from('agent_activity').select('id', { count: 'exact', head: true }).eq('type', 'thesis'),
+    recentQuery.order('opened_at', { ascending: false }).limit(20),
+    closedQuery,
+    activityQuery.order('created_at', { ascending: false }).limit(50),
+    thesesCountQuery,
   ]);
 
   // Count tokens scanned from most recent scan activity
@@ -34,77 +71,96 @@ async function getData() {
     positions: (positionsRes.data as Trade[]) ?? [],
     stats: (statsRes.data as TradeStats) ?? null,
     recentTrades: (recentRes.data as Trade[]) ?? [],
-    closedTrades: closedRes.data ?? [],
+    closedTrades: (closedRes.data as Trade[]) ?? [],
     activities: (activityRes.data as AgentActivity[]) ?? [],
-    thesesCount: (thesesCountRes.count ?? 0) + noTradeCount, // total analyses = theses + no-trades
+    thesesCount: (thesesCountRes.count ?? 0) + noTradeCount,
     tokensScanned,
   };
 }
 
-export default async function DashboardPage() {
-  const { positions, stats, recentTrades, closedTrades, activities, thesesCount, tokensScanned } = await getData();
+export default async function DashboardPage({ searchParams }: PageProps) {
+  // Resolve pool first — needed to scope the data queries
+  const { pools, stats: poolStats } = await getPools();
+  const requestedSlug = searchParams?.pool;
+  const matchedPool = requestedSlug
+    ? pools.find((p) => p.slug === requestedSlug)
+    : undefined;
+  const activePool = matchedPool ?? pickDefaultPool(pools);
+  const activePoolId = activePool?.id ?? null;
 
-  // Portfolio metrics
+  const { positions, stats, recentTrades, closedTrades, activities, thesesCount, tokensScanned } =
+    await getData(activePoolId);
+
+  // ── Derived portfolio metrics ────────────────────────────────────────
   const deployedCapital = positions.reduce((sum, p) => sum + Number(p.position_size_usd), 0);
   const totalRealizedPnl = closedTrades.reduce((sum, t) => sum + Number(t.realized_pnl ?? 0), 0);
 
-  // Today's PnL
   const today = new Date().toISOString().slice(0, 10);
   const todaysClosed = closedTrades.filter((t) => t.closed_at && String(t.closed_at).startsWith(today));
   const todayPnl = todaysClosed.reduce((sum, t) => sum + Number(t.realized_pnl ?? 0), 0);
   const todayPnlPct = deployedCapital > 0 ? todayPnl / deployedCapital : 0;
 
-  // Track record stats
   const closedPnls = closedTrades
     .map(t => Number(t.realized_pnl ?? 0))
     .filter(n => !isNaN(n));
   const bestTrade = closedPnls.length > 0 ? Math.max(...closedPnls) : null;
   const worstTrade = closedPnls.length > 0 ? Math.min(...closedPnls) : null;
 
-  // Average hold time
   const holdTimes = closedTrades
     .filter(t => t.opened_at && t.closed_at)
     .map(t => new Date(t.closed_at!).getTime() - new Date(t.opened_at).getTime());
   const avgHoldMs = holdTimes.length > 0 ? holdTimes.reduce((a, b) => a + b, 0) / holdTimes.length : 0;
   const avgHoldTime = formatDuration(avgHoldMs);
 
-  // Estimate total tokens analyzed from scan count * tokens per scan
   const scanCount = activities.filter(a => a.type === 'scan' || a.type === 'loop_summary').length;
   const totalTokensAnalyzed = Math.max(scanCount * tokensScanned, tokensScanned);
 
-  return (
-    <div className="space-y-5 animate-fade-in">
-      {/* Page header */}
-      <div>
-        <h1 className="text-xl font-semibold text-white">DownBad Trading</h1>
-        <p className="text-sm text-gray-500 mt-0.5">
-          Autonomous Solana trading agent — all trades executed by AI
-        </p>
-      </div>
+  // ── Tab content nodes ────────────────────────────────────────────────
+  const heroStats = (
+    <StatsBar
+      tokensAnalyzed={totalTokensAnalyzed}
+      thesesGenerated={thesesCount}
+      tradesExecuted={recentTrades.length}
+      openPositions={positions.length}
+      winRate={stats?.win_rate ?? 0}
+      totalPnl={totalRealizedPnl}
+      avgHoldTime={avgHoldTime}
+      bestTrade={bestTrade !== null && bestTrade > 0 ? bestTrade : null}
+      worstTrade={worstTrade !== null && worstTrade < 0 ? worstTrade : null}
+    />
+  );
 
-      {/* Decision funnel + track record */}
-      <StatsBar
-        tokensAnalyzed={totalTokensAnalyzed}
-        thesesGenerated={thesesCount}
-        tradesExecuted={recentTrades.length}
-        openPositions={positions.length}
-        winRate={stats?.win_rate ?? 0}
-        totalPnl={totalRealizedPnl}
-        avgHoldTime={avgHoldTime}
-        bestTrade={bestTrade !== null && bestTrade > 0 ? bestTrade : null}
-        worstTrade={worstTrade !== null && worstTrade < 0 ? worstTrade : null}
-      />
-
-      {/* Active positions */}
+  const overviewTab = (
+    <div className="space-y-5">
+      {heroStats}
       <ActivePositions positions={positions} />
-
-      {/* TRADE ANALYSIS — the primary content */}
       <TradeRecommendations trades={recentTrades} tokensScannedPerLoop={tokensScanned} />
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <PortfolioCard
+          deployedCapital={deployedCapital}
+          dailyPnl={todayPnl}
+          dailyPnlPct={todayPnlPct}
+          totalPnl={totalRealizedPnl}
+          openPositions={positions.length}
+          totalTrades={recentTrades.length}
+        />
+        <div className="lg:col-span-2">
+          <AgentStatus />
+        </div>
+      </div>
+    </div>
+  );
 
-      {/* Equity curve */}
-      <EquityCurve trades={recentTrades} />
+  const performanceTab = (
+    <div className="space-y-5">
+      {heroStats}
+      <PerformanceCharts trades={recentTrades} />
+    </div>
+  );
 
-      {/* Two-column: Agent status + Journal */}
+  const activityTab = (
+    <div className="space-y-5">
+      {heroStats}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="space-y-4">
           <PortfolioCard
@@ -122,6 +178,20 @@ export default async function DashboardPage() {
         </div>
       </div>
     </div>
+  );
+
+  const poolsTab = <PoolsPanel pools={pools} stats={poolStats} />;
+
+  return (
+    <DashboardShell
+      pools={pools}
+      poolStats={poolStats}
+      activePoolId={activePoolId ?? ''}
+      overview={overviewTab}
+      performance={performanceTab}
+      activity={activityTab}
+      poolsTab={poolsTab}
+    />
   );
 }
 
