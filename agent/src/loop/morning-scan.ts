@@ -19,12 +19,15 @@ import { createLogger } from '../utils/logger';
 const logger = createLogger('morning-scan');
 
 // ─── System prompt for the deep daily analysis ───────────────────────────────
-
-function buildMorningScanSystemPrompt(): string {
-  return `You are a senior portfolio manager at a quantitative Solana DeFi trading firm. Every morning you produce a ranked watchlist of the 10 best trading candidates for the day.
+//
+// Module-level constant so the exact bytes match on every call — required
+// for Anthropic prompt caching. Runs only once/day, so cache hits only help
+// if the morning scan ever gets retried within the 5-minute cache window,
+// but costs nothing to enable and is good hygiene.
+const MORNING_SCAN_SYSTEM_PROMPT = `You are a senior portfolio manager at a quantitative Solana DeFi trading firm. Every morning you produce a ranked watchlist of the 10 best trading candidates for the day.
 
 ## Your task
-Analyze the full market snapshot and produce exactly 10 ranked trade candidates. Rank #1 is the strongest opportunity, #10 is the weakest (but still tradeable).
+Analyze the full market snapshot and produce exactly 10 ranked trade candidates. Rank #1 is the strongest opportunity, #10 is the weakest (but still tradeable). Be selective — the goal is quality, not filling ten slots.
 
 ## Ranking criteria (in priority order)
 1. **NEW CEX LISTINGS** — Freshly listed on major exchanges = highest priority. These see 20-100%+ moves.
@@ -36,7 +39,7 @@ Analyze the full market snapshot and produce exactly 10 ranked trade candidates.
 7. **Prediction market catalysts** — High-volume crypto prediction markets with extreme probabilities signal upcoming moves.
 
 ## Output format
-Return a JSON array of exactly 10 objects, ranked 1-10:
+Return a JSON array of exactly 10 objects, ranked 1-10. Return ONLY the JSON array — no preamble, no markdown fences.
 
 [
   {
@@ -48,7 +51,7 @@ Return a JSON array of exactly 10 objects, ranked 1-10:
     "stopLossUsd": 1.134,
     "confidence": 0.85,
     "score": 92.5,
-    "thesis": "Professional 4-6 sentence analysis paragraph (see writing guidelines)",
+    "thesis": "Professional 4-6 sentence analysis paragraph",
     "signals": {
       "priceAction": "Specific technical observation with price levels",
       "volume": "Quantified volume analysis relative to averages",
@@ -63,8 +66,9 @@ Write each thesis as a senior trader would in a morning research note:
 - Open with the specific setup or catalyst
 - Reference concrete data points (price levels, volume multiples, holder counts)
 - Explain why TODAY is the day — what makes this actionable now
-- State the risk/reward clearly
-- Write with conviction — no hedging words
+- State the risk/reward clearly (e.g. "risking 7% for a 14% upside")
+- Write with conviction — no hedging words like "might" or "could potentially"
+- Sound like Bloomberg or a prop desk research note, not a chatbot
 
 ## Score calculation
 The "score" field (0-100) represents overall trade quality:
@@ -78,9 +82,9 @@ The "score" field (0-100) represents overall trade quality:
 - Risk/reward must be ≥ 1.5:1 for all entries
 - No meme coins under 24h old unless volume >$5M/1h
 - Jupiter minimum order is $10 — all entries must be tradeable
+- Thesis paragraphs should be 4-6 sentences, no more
 
-Return ONLY the JSON array — no preamble, no markdown fences.`;
-}
+Remember: return ONLY the JSON array, no markdown fences.`;
 
 function buildMorningScanUserPrompt(snapshot: MarketSnapshot, portfolio: Portfolio): string {
   const tokens = [...snapshot.tokens]
@@ -147,16 +151,15 @@ function buildMorningScanUserPrompt(snapshot: MarketSnapshot, portfolio: Portfol
     }));
   }
 
-  let header = `=== DAILY MORNING SCAN ===\n`;
-  header += `Analyze the full Solana market and produce a ranked Top 10 watchlist for today.\n`;
-  header += `Include the BEST 10 trade candidates — ranked by overall opportunity quality.\n\n`;
-  header += `Portfolio: $${portfolio.totalValueUsd.toFixed(0)} total, ${portfolio.holdings.length} open positions\n\n`;
+  // Static task description is in the cached system prompt; keep this minimal.
+  let header = `Portfolio: $${portfolio.totalValueUsd.toFixed(0)} total, ${portfolio.holdings.length} open positions\n`;
 
   if (snapshot.newListings?.length > 0) {
-    header += `*** NEW CEX LISTING(S) DETECTED — PRIORITIZE THESE ***\n\n`;
+    header += `*** NEW CEX LISTING(S) DETECTED — prioritize these ***\n`;
   }
 
-  return header + `Market data:\n${JSON.stringify(prompt, null, 2)}`;
+  // Compact JSON — no pretty-print whitespace in tokens
+  return header + `\nMarket data:\n${JSON.stringify(prompt)}`;
 }
 
 // ─── LLM call ─────────────────────────────────────────────────────────────────
@@ -188,12 +191,28 @@ async function callLLMForWatchlist(
 
   if (config.llmProvider === 'anthropic') {
     const client = new Anthropic({ apiKey: config.anthropicApiKey });
-    const response = await client.messages.create({
+    // Use the prompt-caching beta path so the system prompt can carry cache_control.
+    const response = await client.beta.promptCaching.messages.create({
       model: config.anthropicModel,
       max_tokens: 4096,
+      system: [
+        {
+          type: 'text',
+          text: systemPrompt,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
       messages: [{ role: 'user', content: userPrompt }],
-      system: systemPrompt,
     });
+    const usage = response.usage as unknown as {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
+    logger.debug(
+      `Morning scan LLM usage: in=${usage?.input_tokens ?? 0} cache_read=${usage?.cache_read_input_tokens ?? 0} cache_write=${usage?.cache_creation_input_tokens ?? 0} out=${usage?.output_tokens ?? 0}`
+    );
     const block = response.content[0];
     raw = block.type === 'text' ? block.text : '[]';
   } else {
@@ -234,10 +253,9 @@ export async function runMorningScan(
   const startTime = Date.now();
 
   try {
-    const systemPrompt = buildMorningScanSystemPrompt();
     const userPrompt = buildMorningScanUserPrompt(snapshot, portfolio);
 
-    const candidates = await callLLMForWatchlist(systemPrompt, userPrompt, config);
+    const candidates = await callLLMForWatchlist(MORNING_SCAN_SYSTEM_PROMPT, userPrompt, config);
 
     if (candidates.length === 0) {
       logger.warn('Morning scan: LLM returned no candidates');

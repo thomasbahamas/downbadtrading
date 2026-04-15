@@ -153,11 +153,17 @@ async function runLoop(): Promise<void> {
       isRunning = false;
     }
 
-    // Sleep until next interval, accounting for loop duration
+    // Sleep until next interval, accounting for loop duration.
+    // Interval is adaptive — see computeAdaptiveInterval for the rules.
     const elapsed = Date.now() - loopStart;
-    const sleepMs = Math.max(0, config.loopIntervalSeconds * 1000 - elapsed);
+    const intervalSeconds = computeAdaptiveInterval(agentState, config.loopIntervalSeconds);
+    const sleepMs = Math.max(0, intervalSeconds * 1000 - elapsed);
     if (sleepMs > 0 && !shutdownRequested) {
-      logger.debug(`Sleeping ${Math.round(sleepMs / 1000)}s until next loop`);
+      if (intervalSeconds !== config.loopIntervalSeconds) {
+        logger.info(`Sleeping ${Math.round(sleepMs / 1000)}s (adaptive, base ${config.loopIntervalSeconds}s)`);
+      } else {
+        logger.debug(`Sleeping ${Math.round(sleepMs / 1000)}s until next loop`);
+      }
       await sleep(sleepMs);
     }
   }
@@ -210,6 +216,47 @@ async function main(): Promise<void> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ─── Adaptive loop interval ──────────────────────────────────────────────
+// Extends the sleep between loops when nothing is happening — cuts LLM call
+// frequency (and spend) on quiet days without compromising responsiveness
+// when positions are open or volatility is elevated.
+//
+// Rules (longest wins):
+//  - Open positions → never slower than base (positions need monitoring)
+//  - Volatile market (hot token mover or CEX listing) → base interval
+//  - Quiet market (no hot tokens, neutral F&G) → 1.5× base
+//  - Dead market (extreme fear/greed, no movers) → 2× base
+//  - Hard ceiling: 600s (10 min) regardless
+function computeAdaptiveInterval(
+  state: import('./types').AgentState,
+  baseSeconds: number
+): number {
+  // If positions are open, always use base interval — we need to catch fills
+  // and rotation opportunities responsively.
+  const openPositions = state.activePositions?.length ?? 0;
+  if (openPositions > 0) return baseSeconds;
+
+  const snapshot = state.marketSnapshot;
+  if (!snapshot) return baseSeconds; // no data → default
+
+  const fg = snapshot.globalMetrics.fearGreedIndex;
+  const hasHotToken = snapshot.tokens.some(
+    (t) => Math.abs(t.priceChange1h ?? 0) > 5
+  );
+  const hasCexListing = (snapshot.newListings?.length ?? 0) > 0;
+
+  // Volatility signal — keep base interval
+  if (hasHotToken || hasCexListing) return baseSeconds;
+
+  // Dead market — fear/greed extreme AND no movers → slowest
+  if (fg > 0 && (fg < 20 || fg > 80)) {
+    return Math.min(baseSeconds * 2, 600);
+  }
+
+  // Quiet but not dead — slow down slightly
+  return Math.min(Math.round(baseSeconds * 1.5), 600);
 }
 
 function buildLoopSummary(state: import('./types').AgentState, loopNum: number): {

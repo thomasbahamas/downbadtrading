@@ -186,9 +186,18 @@ async function runHaikuScreening(
 }
 
 // ─── Layer 4: Full Sonnet analysis (existing logic, optimized) ────────────
+//
+// SYSTEM_PROMPT is a module-level constant so the exact bytes are identical
+// on every call. This is required for Anthropic prompt caching — any byte
+// difference invalidates the prefix. Do NOT interpolate anything into it.
+//
+// Sized to exceed Sonnet 4.5's 1024-token cache minimum. Cache hits charge
+// ~0.1x input price instead of 1x, saving ~90% on the system-prompt portion
+// of every Sonnet call after the first.
+const SYSTEM_PROMPT = `You are a senior portfolio manager at a quantitative trading firm specializing in Solana DeFi markets. You write with precision and authority. Your job: analyze on-chain market data, identify high-confidence short-term trading opportunities, and produce institutional-grade trade recommendations.
 
-function buildSystemPrompt(): string {
-  return `You are a senior portfolio manager at a quantitative trading firm specializing in Solana DeFi markets. You write with precision and authority. Your job is to analyze on-chain market data, identify high-confidence short-term trading opportunities, and produce institutional-grade trade recommendations.
+## Your task each call
+Analyze the Solana market data in the user message and identify the single best trade opportunity, or return a no-trade signal if conditions don't warrant a position. Be selective — most calls will legitimately be no-trade.
 
 ## Your constraints
 - Only suggest trades on Solana tokens with sufficient liquidity (>$50k USD)
@@ -196,10 +205,11 @@ function buildSystemPrompt(): string {
 - Focus on tokens showing clear technical or on-chain signals
 - You must provide specific, measurable price targets
 - Risk/reward ratio MUST be at least 1.5:1 — your TP should be at least 1.5x further from entry than your SL. E.g. entry=$1.00, SL=$0.92 (8% risk) → TP must be ≥$1.12 (12% reward). This is a hard requirement — trades below 1.5 R/R will be automatically rejected.
+- Do not suggest meme coins under 24 hours old unless volume is exceptional (>$5M in 1h)
 - If no clear opportunity exists, return a no-trade signal
 
 ## Output format
-You MUST return valid JSON matching exactly one of these schemas:
+You MUST return valid JSON matching exactly one of these schemas. Return ONLY the JSON object — no preamble, no explanation, no markdown code fences.
 
 ### Trade signal:
 {
@@ -211,7 +221,7 @@ You MUST return valid JSON matching exactly one of these schemas:
   "stopLossUsd": 1.134,
   "positionSizePct": 5,
   "confidenceScore": 0.82,
-  "reasoning": "PROFESSIONAL ANALYSIS (see writing guidelines below)",
+  "reasoning": "Professional analysis paragraph (see writing guidelines below)",
   "signals": {
     "priceAction": "Specific technical observation with price levels",
     "volume": "Quantified volume analysis relative to averages",
@@ -227,7 +237,7 @@ You MUST return valid JSON matching exactly one of these schemas:
 }
 
 ## Writing guidelines for the "reasoning" field
-Write a single polished paragraph (4-6 sentences) as a senior trader would in a morning research note. This paragraph will be published on a public dashboard. Requirements:
+Write a single polished paragraph (4-6 sentences) as a senior trader would in a morning research note. This paragraph is published on a public dashboard. Requirements:
 - Open with the specific setup or pattern you identified (e.g. "accumulation at support", "breakout from consolidation", "volume divergence")
 - Reference concrete data points from the snapshot (price levels, volume multiples, percentage changes, holder counts)
 - Explain WHY now is the entry — what catalyst or confluence makes this the right moment
@@ -243,22 +253,21 @@ Each signal field should be a specific, data-backed observation — not generic.
 - onChainMetrics: "Top 10 holders increased positions by 1.2% in 24h; exchange outflows exceed inflows by $800K"
 
 ## Signal weighting (in order of priority)
-1. **NEW CEX LISTINGS** (highest priority): When a token gets newly listed on Binance, Coinbase, Robinhood, Backpack, or Gemini, this is often your strongest signal. New listings frequently see 20-100%+ pumps. Set confidence high (0.8+), TP aggressive (15-30%), SL tighter (5-8%).
-2. On-chain: whale movements, holder growth, large transfers vs. exchange deposits
-3. Volume: volume spikes relative to 24h average, buy/sell volume ratio
-4. **Social mindshare**: If socialMindshare data is provided, tokens trending with positive sentiment and high mindshare rank deserve a closer look. A token that's #1-5 in social buzz with positive sentiment is a bullish confluence signal. Negative sentiment trending = avoid.
+1. **NEW CEX LISTINGS** (highest priority): When a token is newly listed on Binance, Coinbase, Robinhood, Backpack, or Gemini, this is often your strongest signal. New listings frequently see 20-100%+ pumps. Set confidence high (0.8+), TP aggressive (15-30%), SL tighter (5-8%).
+2. **On-chain strength**: whale movements, holder growth, large transfers vs exchange deposits, accumulation patterns
+3. **Volume confluence**: volume spikes relative to 24h average, elevated buy/sell volume ratio, rising open interest
+4. **Social mindshare**: If socialMindshare data is provided, tokens trending with positive sentiment and high mindshare rank deserve closer look. A token that's #1-5 in social buzz with positive sentiment is a bullish confluence signal. Negative sentiment trending = avoid.
 5. **Prediction markets**: If predictionMarkets data is provided, crypto-related prediction markets with high volume and extreme probabilities (>80% or <20%) can signal upcoming catalysts or consensus shifts.
-6. Price action: trend, support/resistance, momentum
+6. **Price action**: trend, support/resistance, momentum, higher highs/lows, breakouts from consolidation
 
-Do not suggest meme coins under 24 hours old unless volume is exceptional (>$5M in 1h).
-
-## Important behavioral notes
+## Behavioral notes
 - Even in extreme fear/greed markets, there are opportunities — contrarian entries during extreme fear can have excellent risk/reward
 - Missing data fields (buy/sell ratio = "n/a", volumeChange = "0%") are expected for some data sources — do not refuse to trade solely because a field is unavailable. Work with what you have and note any data limitations in your analysis.
 - If you see 3+ tokens with strong price action and healthy volume, pick the best one rather than defaulting to no-trade
+- Screener-flagged tokens (appearing in SCREENER FLAGGED or DAILY WATCHLIST sections of the user prompt) have already passed a first-pass filter — weight them higher, but don't force a trade if the setup isn't there
+- New CEX listings that match Solana tokens in the snapshot are your single highest-alpha signal — never miss one
 
-Return ONLY the JSON object — no preamble, no explanation, no markdown code fences.`;
-}
+Remember: return ONLY the JSON object.`;
 
 function buildUserPrompt(
   snapshot: MarketSnapshot,
@@ -367,26 +376,24 @@ function buildUserPrompt(
     }));
   }
 
-  let header =
-    `Analyze the following Solana market data and identify the single best trade opportunity, ` +
-    `or return a no-trade signal if conditions don't warrant a position.\n\n` +
-    `Portfolio: $${portfolio.totalValueUsd.toFixed(0)} total, ` +
-    `$${portfolioSummary.availableUsd.toFixed(0)} available, ` +
-    `${portfolioSummary.openPositions} open positions\n\n`;
+  // Keep the user-prompt header minimal — the static task description lives
+  // in the cached system prompt. Only dynamic flags go here.
+  let header = `Portfolio: $${portfolio.totalValueUsd.toFixed(0)} total, $${portfolioSummary.availableUsd.toFixed(0)} available, ${portfolioSummary.openPositions} open positions\n`;
 
   if (activeWatchlist.length > 0) {
-    header += `*** TODAY'S WATCHLIST ACTIVE — Strongly prefer these pre-analyzed candidates unless market data clearly contradicts. ***\n\n`;
+    header += `*** TODAY'S WATCHLIST ACTIVE — prefer pre-analyzed candidates unless data contradicts ***\n`;
   }
 
   if (focusTokens && focusTokens.length > 0 && !focusTokens.includes('FALLBACK')) {
-    header += `*** SCREENER FLAGGED: ${focusTokens.join(', ')} — prioritize these ***\n\n`;
+    header += `*** SCREENER FLAGGED: ${focusTokens.join(', ')} — prioritize these ***\n`;
   }
 
   if (snapshot.newListings?.length > 0) {
-    header += `*** NEW CEX LISTING(S) DETECTED — CHECK IF ANY MATCH SOLANA TOKENS BELOW ***\n\n`;
+    header += `*** NEW CEX LISTING(S) DETECTED — check if any match Solana tokens below ***\n`;
   }
 
-  return header + `Market data:\n${JSON.stringify(prompt, null, 2)}`;
+  // Compact JSON (no pretty-print indentation) — saves ~25% of user prompt tokens
+  return header + `\nMarket data:\n${JSON.stringify(prompt)}`;
 }
 
 // ─── LLM call ─────────────────────────────────────────────────────────────
@@ -399,12 +406,35 @@ async function callLLM(
 ): Promise<string> {
   if (config.llmProvider === 'anthropic') {
     const client = new Anthropic({ apiKey: config.anthropicApiKey });
-    const response = await client.messages.create({
+    // Use the prompt-caching beta path so system prompt can carry
+    // cache_control. On Sonnet 4.5 the minimum cacheable prefix is 1024
+    // tokens — SYSTEM_PROMPT is sized to exceed that. Cache hits cost ~0.1x
+    // the base input token price vs uncached.
+    const response = await client.beta.promptCaching.messages.create({
       model: model ?? config.anthropicModel,
       max_tokens: 1024,
+      system: [
+        {
+          type: 'text',
+          text: systemPrompt,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
       messages: [{ role: 'user', content: userPrompt }],
-      system: systemPrompt,
     });
+
+    // Emit usage so we can verify caching is actually happening in prod logs.
+    // Expect cache_read_input_tokens > 0 after the first request per 5-min window.
+    const usage = response.usage as unknown as {
+      input_tokens?: number;
+      output_tokens?: number;
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
+    logger.debug(
+      `LLM usage: in=${usage?.input_tokens ?? 0} cache_read=${usage?.cache_read_input_tokens ?? 0} cache_write=${usage?.cache_creation_input_tokens ?? 0} out=${usage?.output_tokens ?? 0}`
+    );
+
     const block = response.content[0];
     if (block.type !== 'text') throw new Error('Unexpected Anthropic response type');
     return block.text;
@@ -594,10 +624,9 @@ export async function analyzeNode(
     // ── Layer 4: Sonnet full analysis (now watchlist-aware) ──────────
     logger.info(`ANALYZE: Haiku flagged ${flaggedTokens.join(', ')} — calling Sonnet for full analysis`);
 
-    const systemPrompt = buildSystemPrompt();
     const userPrompt = buildUserPrompt(snapshot, state.portfolio, flaggedTokens, watchlist);
 
-    const rawResponse = await callLLM(systemPrompt, userPrompt, config);
+    const rawResponse = await callLLM(SYSTEM_PROMPT, userPrompt, config);
     const thesis = parseLLMResponse(rawResponse, snapshot, config, state.portfolio);
 
     if (thesis) {
